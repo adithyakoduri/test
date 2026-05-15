@@ -1,0 +1,332 @@
+module i2c_slave_controller(
+	input i2c_sda_out,
+	output i2c_sda_in,
+	input i2c_scl,
+	input reset_n,
+	input clk,
+	input [7:0] slave_data_in,
+	output reg slave_rx_write_enable,
+	output reg slave_tx_read_enable,
+	output reg [7:0] slave_rx_fifo_data,
+	output reg i2c_slave_output_enable,
+	output [127:0] debug_i2c_slave
+	);
+	
+	localparam ADDRESS = 7'b0011010;
+	localparam READ_ADDR = 0;
+	localparam SEND_ACK = 1;
+	localparam READ_DATA = 2;
+	localparam WRITE_DATA = 3;
+	localparam SEND_ACK2 = 4;
+	localparam WAIT_WRITE_DATA = 5;
+	
+	reg [7:0] addr;
+	reg [2:0] counter;
+	reg [2:0] state ;
+	reg sda_out ;
+	reg start ;
+	reg stop ;
+	reg write_enable ;
+	reg enb; // signal used for making stop low
+	reg pe_edge_delay,ne_edge_delay;
+	wire pe_edge,ne_edge;	
+	//assign i2c_sda_in = (write_enable == 1) ? sda_out : 'b0;
+	assign i2c_sda_in = (write_enable == 1) ? sda_out : 'b1; // FIXED IN ECO FOR SHIP7-732
+
+	/////// output enable logic ////
+	always@(posedge clk or negedge reset_n)
+	begin
+		if(!reset_n)
+			i2c_slave_output_enable <= 1'b0;
+		else if((state == SEND_ACK) || (state == WRITE_DATA) || (state == SEND_ACK2))
+			i2c_slave_output_enable <= 1'b1;
+		else
+			i2c_slave_output_enable <= 1'b0;
+	end
+
+	//// start and stop with sys_clk ///
+	always@(posedge clk or negedge reset_n)
+	begin
+		if(!reset_n)
+			ne_edge_delay <= 1'b0;
+		else
+			ne_edge_delay <= i2c_sda_out;
+	end
+
+	assign ne_edge =  ((~i2c_sda_out) & ne_edge_delay);
+
+	always@(posedge clk or negedge reset_n or posedge stop)
+	begin
+		if(!reset_n)
+			start <= 1'b0;
+		else if(stop == 1)
+			start <= 1'b0;
+		else if(ne_edge == 1 && i2c_scl == 1)
+			start <= 1'b1;
+	end
+
+	always@(posedge clk or negedge reset_n)
+	begin
+		if(!reset_n)
+			pe_edge_delay <= 1'b0;
+		else 
+			pe_edge_delay <= i2c_sda_out;
+	end
+
+	assign pe_edge = (i2c_sda_out & (~pe_edge_delay));
+
+	always@(posedge clk or negedge reset_n or posedge enb)
+	begin
+		if(!reset_n)
+			stop <= 1'b0;
+		else if(enb == 1)
+			stop <= 1'b0;
+		else if(start == 1 && ((pe_edge == 1 && i2c_scl == 1) || (pe_edge == 1 && state == WAIT_WRITE_DATA))) // for no_ack detection condition
+			stop <= 1;
+	end
+
+	always@(posedge clk or negedge reset_n)
+	begin
+		if(!reset_n)
+			enb <= 1'b0;
+		else if(counter == 7 && state == READ_ADDR)
+			enb <= 1'b1;
+		else
+			enb <= 1'b0;
+	end
+
+
+
+	
+
+	///////////////////////////  slave RX FIFO write enable logic /////////////////////
+	
+
+	parameter [1:0] slave_rx_idle = 2'd0,
+			slave_rx_write_into_fifo = 2'd1,
+			stop_state = 2'd2;
+
+			reg [1:0] slave_rx_state,slave_rx_next_state;
+
+		 always@(posedge clk or negedge reset_n)
+		begin
+			if(!reset_n)
+				slave_rx_state <= slave_rx_idle;
+			else
+				slave_rx_state <= slave_rx_next_state;
+		end
+	
+		always@(*)
+		begin
+			slave_rx_next_state = slave_rx_idle;
+			case(slave_rx_state)
+			slave_rx_idle : begin
+					if(state == SEND_ACK2 && counter == 0)
+						slave_rx_next_state = slave_rx_write_into_fifo;
+					else 
+						slave_rx_next_state = slave_rx_idle;
+			end
+
+			slave_rx_write_into_fifo : begin
+					if(state == SEND_ACK2 && counter == 0 )
+						slave_rx_next_state = stop_state;
+					else
+						slave_rx_next_state = slave_rx_write_into_fifo;
+			end
+		
+			stop_state : begin
+					if(state != SEND_ACK2)
+							slave_rx_next_state = slave_rx_idle;
+					else
+							slave_rx_next_state = stop_state;
+			end
+			default : slave_rx_next_state = slave_rx_idle;
+			endcase
+		end
+
+		always@(posedge clk or negedge reset_n)
+		begin
+			if(!reset_n)
+				slave_rx_write_enable <= 1'b0;
+			else
+			begin
+				case(slave_rx_state)
+					slave_rx_idle : slave_rx_write_enable <= 1'b0;
+		
+					slave_rx_write_into_fifo : slave_rx_write_enable <= 1'b1;
+
+					stop_state : slave_rx_write_enable <= 1'b0;
+
+					default :  slave_rx_write_enable <= 1'b0;
+
+				endcase
+			end
+				
+		end
+		////////////////////// 	slave TX FIFO read enable logic //
+				parameter [1:0] slave_tx_idle = 2'd0,
+						slave_tx_read_into_fifo = 2'd1,
+						stop_tx_state = 2'd2;
+
+			reg [1:0] slave_tx_state,slave_tx_next_state;
+
+			 always@(posedge clk or negedge reset_n)
+			begin
+				if(!reset_n)
+					slave_tx_state <= slave_tx_idle;
+				else
+					slave_tx_state <= slave_tx_next_state;
+			end
+
+			always@(*)
+			begin
+					slave_tx_next_state = slave_tx_idle;
+					case(slave_tx_state)
+							slave_tx_idle : begin
+									if((state == SEND_ACK && addr[0] == 1 && counter == 0  ) || (state == WAIT_WRITE_DATA && counter == 7))
+											slave_tx_next_state =  slave_tx_read_into_fifo;
+									else
+											 slave_tx_next_state = slave_tx_idle;
+							end
+				
+							slave_tx_read_into_fifo : begin
+									if((state == SEND_ACK && counter == 0 && addr[0] == 1) || (state == WAIT_WRITE_DATA && counter == 7))
+											slave_tx_next_state = stop_state;
+									else
+											 slave_tx_next_state = slave_tx_idle;
+							end
+
+							stop_tx_state : begin
+									if(counter == 0 || counter == 7 || state == SEND_ACK)
+											slave_tx_next_state = stop_tx_state;
+									else
+											slave_tx_next_state = slave_tx_idle;
+							end
+
+							default : slave_tx_next_state = slave_tx_idle;
+					endcase
+			end
+
+			always@(posedge clk or negedge reset_n)
+			begin
+				if(!reset_n)
+					slave_tx_read_enable <= 1'b0;
+				else
+				begin
+					case(slave_tx_state)
+						slave_tx_idle : slave_tx_read_enable <= 1'b0;
+
+						slave_tx_read_into_fifo : slave_tx_read_enable <= 1'b1;
+
+						stop_tx_state : slave_tx_read_enable <= 1'b0;
+
+						default : slave_tx_read_enable <= 1'b0;
+					endcase
+				end 
+			end
+
+		//////////////////////////////////////////////////////////////////////
+
+	always @(posedge i2c_scl or posedge stop or negedge reset_n) begin
+		if(!reset_n)begin
+			counter <= 7;
+			state <= READ_ADDR;
+			addr <= 'b0;
+		end
+		else if(stop == 1) begin
+			counter <= 7;
+			state <= READ_ADDR;
+			addr <= 'b0;
+		end
+		else begin 
+			case(state)
+				READ_ADDR: begin
+					addr[counter] <= i2c_sda_out;
+					if(counter == 0) state <= SEND_ACK;
+					else counter <= counter - 1;
+				end
+				
+				SEND_ACK: begin
+						counter <= 7;
+					if(addr[7:1] == ADDRESS) begin
+						if(addr[0] == 0) begin 
+							state <= READ_DATA;
+						end
+						else state <= WRITE_DATA;
+					end
+				end
+				
+				READ_DATA: begin
+						slave_rx_fifo_data[counter] <= i2c_sda_out;
+						if(counter == 0) begin
+							state <= SEND_ACK2;
+						end 
+						else counter <= counter - 1;
+				end
+				
+				SEND_ACK2: begin
+						counter <= 7;
+						state <= READ_DATA;
+				end
+				
+				WRITE_DATA: begin
+						counter <= 7;
+						if(counter == 0)
+					            begin
+							 state <= WAIT_WRITE_DATA;	
+						    end
+						else counter <= counter - 1;
+				end
+
+				WAIT_WRITE_DATA : begin
+					state <= WRITE_DATA; 
+						
+				end
+
+				default : state <= READ_ADDR;
+				
+			endcase
+		end
+	end
+	
+	always @(negedge i2c_scl or negedge reset_n) begin
+		if(!reset_n)
+		begin
+			sda_out <= 1'b0;
+			write_enable <= 1'b0;
+		end
+		else begin 
+		case(state)
+			
+			READ_ADDR: begin
+				write_enable <= 0;	
+			end
+			
+			SEND_ACK: begin
+					sda_out <= 0;
+					write_enable <= 1;	
+			end
+			
+			READ_DATA: begin
+					write_enable <= 0;
+			end
+			
+			WRITE_DATA: begin
+				sda_out <= slave_data_in[counter];
+				write_enable <= 1;
+			end
+			
+		
+			SEND_ACK2: begin
+					sda_out <= 0;
+					write_enable <= 1;
+				end
+
+			default : write_enable <= 0;
+		endcase
+	end
+	end
+
+assign debug_i2c_slave = {76'd0,slave_tx_next_state,slave_tx_state,slave_rx_next_state,slave_rx_state,ne_edge_delay,ne_edge,pe_edge_delay,pe_edge,write_enable,stop,start,state,counter,addr,slave_rx_fifo_data,slave_tx_read_enable,slave_rx_write_enable,slave_data_in,clk,reset_n,i2c_scl,i2c_sda_in,i2c_sda_out};
+
+endmodule

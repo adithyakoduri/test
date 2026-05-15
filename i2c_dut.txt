@@ -1,0 +1,122 @@
+module i2c_top(slave_addr_top,length_top,master_clk,slave_clk,reset_n,DAV,in_32,out_8,HSIZE,M_TX_FIFO_STATUS,M_RX_FIFO_STATUS,
+				ahb_rx_re,DIVIDE_BY,DAV_SLAVE,slave_in_32,slave_data_out,ahb_slave_rx_re,
+				clear_tx_over_run, clear_tx_under_run, clear_rx_over_run, clear_rx_under_run, 
+				clear_slave_tx_over_run, clear_slave_tx_under_run, clear_slave_rx_over_run, clear_slave_rx_under_run,
+				S_RX_FIFO_STATUS, S_TX_FIFO_STATUS, i2c_sda_in, i2c_sda_out, i2c_scl,
+				i2c_sda_slave_in, i2c_sda_slave_out, i2c_scl_slave_in, I2CM_sw_rstn, I2CS_sw_rstn,i2c_master_far_near_enb,i2c_master_debug_enb,i2c_slave_far_near_enb,   				i2c_slave_debug_enb,stop_state,begin_transfer,re_start_enb,lfrs,master_ack_detect,master_no_ack_detect,repeat_we_re,clear_signal_top,debug_i2c0,                                        debug_i2c1,debug_i2c2,debug_i2c3,debug_i2c4,debug_i2c5,debug_i2c6,debug_i2c7,reset_ext_slave
+`ifdef S9P4_DFT_ENABLE	
+, dft_test_mode
+`endif
+	);
+`ifdef S9P4_DFT_ENABLE	
+input dft_test_mode; // Modified Sharmi
+`endif
+input [7:0] slave_addr_top;
+input [5:0] length_top;
+input reset_ext_slave;
+output [127:0] debug_i2c0,debug_i2c1,debug_i2c2,debug_i2c3,debug_i2c4,debug_i2c5,debug_i2c6,debug_i2c7;
+wire    [127:0] debug_i2c_master_wire,debug_i2c_slave_wire,debug_i2c_master_tx_wire,debug_i2c_master_rx_wire,debug_i2c_slave_tx_wire,debug_i2c_slave_rx_wire,debug_fifo_bus_master,debug_fifo_bus_slave;
+assign debug_i2c0 = debug_i2c_master_wire;
+assign debug_i2c1 = debug_i2c_slave_wire;
+assign debug_i2c2 = debug_i2c_master_tx_wire;
+assign debug_i2c3 = debug_i2c_master_rx_wire;
+assign debug_i2c4 = debug_i2c_slave_tx_wire;
+assign debug_i2c5 = debug_i2c_slave_rx_wire;
+assign debug_i2c6 = debug_fifo_bus_master;
+assign debug_i2c7 = debug_fifo_bus_slave;
+
+input [1:0] clear_signal_top;
+input repeat_we_re,re_start_enb;
+input [5:0] lfrs;   // lfrs ---> length for repeated start
+output [1:0] master_ack_detect,master_no_ack_detect; // 18/1/2021
+input begin_transfer;
+output stop_state;
+input master_clk,slave_clk,reset_n,DAV;
+input i2c_master_far_near_enb,i2c_master_debug_enb,i2c_slave_far_near_enb,i2c_slave_debug_enb;
+input [2:0]HSIZE;
+input [31:0]in_32;
+output [7:0]out_8;
+input ahb_rx_re;
+//output  RX_BUSY,RX_FREE,busy;
+output [31:0] M_TX_FIFO_STATUS; //-----------> 1
+output [31:0] M_RX_FIFO_STATUS; //-----------> 2
+output [31:0] S_RX_FIFO_STATUS;
+output [31:0] S_TX_FIFO_STATUS;
+input clear_tx_over_run, clear_tx_under_run, clear_rx_over_run, clear_rx_under_run;
+input clear_slave_tx_over_run, clear_slave_tx_under_run, clear_slave_rx_over_run, clear_slave_rx_under_run;
+input	I2CM_sw_rstn;
+input	I2CS_sw_rstn;
+
+// Master
+input i2c_sda_in;
+output i2c_sda_out;
+output i2c_scl;
+
+//Slave
+input i2c_sda_slave_in;
+output i2c_sda_slave_out;
+input i2c_scl_slave_in;
+
+input [31:0] DIVIDE_BY;
+wire [7:0] MASTER_FSM_OUT;
+wire [7:0] TX_DATA_OUT;
+output [7:0] slave_data_out;
+input ahb_slave_rx_re;
+input[31:0]slave_in_32;
+input DAV_SLAVE;
+wire [7:0] slave_tx_out;
+wire read_enable_for_tx_fifo;
+wire master_rx_fifo_write_enable,slave_rx_fifo_write_enable_wire,slave_tx_read_enable_wire;
+wire [7:0] master_rx_fifo_data,slave_rx_fifo_data_wire;
+wire [7:0] out_8_wire;
+
+assign out_8 = out_8_wire;
+
+wire [31:0] master_tx_wire;
+wire [7:0] master_rx_din_wire,slave_tx_out_wire,slave_rx_din_wire;
+wire [31:0] slave_tx_wire;
+wire [7:0] slave_data_out_wire;
+wire stop_state_wire;
+
+assign slave_data_out = slave_data_out_wire;
+assign stop_state = stop_state_wire;
+
+/////////// master //////
+debug_mux_i2c MASTER (.dbg_tx_fifo_din_i2c(in_32),.dbg_rx_fifo_dout_i2c(out_8_wire),.dbg_near_end_out_i2c(master_tx_wire),.dbg_tx_fifo_dout_i2c(TX_DATA_OUT),.dbg_ISR_out_i2c(MASTER_FSM_OUT),.dbg_far_end_out_i2c(master_rx_din_wire),.dbg_FAR_NEARn_enb_i2c(i2c_master_far_near_enb),.dbg_DBG_EN_i2c(i2c_master_debug_enb),.debug_mux_i2c_bus(debug_fifo_bus_master));
+// Modified Sharmi
+//
+//
+
+// Master Reset Control Modified Sharmi
+ `ifdef S9P4_DFT_ENABLE
+assign dft_rst_ctrl_mux_35 = dft_test_mode ? reset_n :(reset_n & I2CM_sw_rstn) ;
+ `else
+assign dft_rst_ctrl_mux_35 = (reset_n & I2CM_sw_rstn) ;
+ `endif
+
+i2c_controller I2C_MASTER (.reset_slave(reset_ext_slave), `ifdef S9P4_DFT_ENABLE .dft_test_mode (dft_test_mode), `endif .clear_signal(clear_signal_top),.re_wr_re(repeat_we_re),.ack_detect(master_ack_detect),.no_ack_detect(master_no_ack_detect),.lfrs_master(lfrs),.re_start_master(re_start_enb),.stop_state_detect(stop_state_wire),.DIVIDE_BY(DIVIDE_BY),.clk(master_clk),.rst_n(dft_rst_ctrl_mux_35),.slave_addr(slave_addr_top),.data_in(TX_DATA_OUT[7:0]),.enable(begin_transfer),.length(length_top),.data_out(MASTER_FSM_OUT),.i2c_sda_in(i2c_sda_in),.i2c_sda_out(i2c_sda_out),.i2c_scl(i2c_scl),.tx_re(read_enable_for_tx_fifo),.rx_we(master_rx_fifo_write_enable),.debug_i2c_master(debug_i2c_master_wire));
+
+i2c_TX_FIFO #(.WIDTH(8),.DEPTH(16)) TX_FIFO(.clk(master_clk),.reset_n(reset_n),.we(DAV),.re(read_enable_for_tx_fifo),.HSIZE(HSIZE),.din(master_tx_wire),.M_TX_FIFO_STATUS(M_TX_FIFO_STATUS),.clear_tx_over_run(clear_tx_over_run),.clear_tx_under_run(clear_tx_under_run),.dout(TX_DATA_OUT),.debug_i2c_master_tx(debug_i2c_master_tx_wire));
+
+i2c_rx_fifo #(.WIDTH(8),.DEPTH(16)) RX_FIFO(.clk(master_clk),.reset_n(reset_n),.rx_we(master_rx_fifo_write_enable),.rx_re(ahb_rx_re),.rx_din(master_rx_din_wire),.M_RX_FIFO_STATUS(M_RX_FIFO_STATUS),.rx_dout(out_8_wire),.clear_rx_over_run(clear_rx_over_run),.clear_rx_under_run(clear_rx_under_run),.debug_i2c_master_rx(debug_i2c_master_rx_wire));
+
+
+/////////////// slave //////////////
+
+debug_mux_i2c SLAVE (.dbg_tx_fifo_din_i2c(slave_in_32),.dbg_rx_fifo_dout_i2c(slave_data_out_wire),.dbg_near_end_out_i2c(slave_tx_wire),.dbg_tx_fifo_dout_i2c(slave_tx_out_wire),.dbg_ISR_out_i2c(slave_rx_fifo_data_wire),.dbg_far_end_out_i2c(slave_rx_din_wire),.dbg_FAR_NEARn_enb_i2c(i2c_slave_far_near_enb),.dbg_DBG_EN_i2c(i2c_slave_debug_enb),.debug_mux_i2c_bus(debug_fifo_bus_slave));
+
+ `ifdef S9P4_DFT_ENABLE
+assign dft_rst_ctrl_mux_36 = dft_test_mode ? reset_n : (reset_n & I2CS_sw_rstn) ;
+ `else
+assign dft_rst_ctrl_mux_36 = (reset_n & I2CS_sw_rstn) ;
+ `endif
+
+i2c_slave_controller I2C_SLAVE (.i2c_sda_in(i2c_sda_slave_out),.i2c_sda_out(i2c_sda_slave_in),.i2c_scl(i2c_scl_slave_in),.reset_n(dft_rst_ctrl_mux_36),.clk(slave_clk),.slave_data_in(slave_tx_out_wire),.slave_rx_write_enable(slave_rx_fifo_write_enable_wire),.slave_tx_read_enable(slave_tx_read_enable_wire),.slave_rx_fifo_data(slave_rx_fifo_data_wire),.i2c_slave_output_enable(I2C_slave_output_enable_wire),.debug_i2c_slave(debug_i2c_slave_wire));
+
+i2c_slave_rx_fifo #(.WIDTH(8),.DEPTH(16)) SLAVE_RX_FIFO(.clk(slave_clk),.reset_n(reset_n),.slave_rx_we(slave_rx_fifo_write_enable_wire),.slave_rx_re(ahb_slave_rx_re),.slave_rx_din(slave_rx_din_wire),.slave_rx_dout(slave_data_out_wire),.S_RX_FIFO_STATUS(S_RX_FIFO_STATUS),.clear_slave_rx_over_run(clear_slave_rx_over_run),.clear_slave_rx_under_run(clear_slave_rx_under_run),.debug_i2c_slave_rx(debug_i2c_slave_rx_wire));
+
+i2c_slave_tx_fifo #(.WIDTH(8),.DEPTH(16)) SLAVE_TX_FIFO(.clk(slave_clk),.reset_n(reset_n),.slave_tx_we(DAV_SLAVE),.slave_tx_re(slave_tx_read_enable_wire),.HSIZE(HSIZE),.slave_tx_din(slave_tx_wire),.slave_tx_dout(slave_tx_out_wire),.S_TX_FIFO_STATUS(S_TX_FIFO_STATUS),.clear_slave_tx_over_run(clear_slave_tx_over_run),.clear_slave_tx_under_run(clear_slave_tx_under_run),.debug_i2c_slave_tx(debug_i2c_slave_tx_wire));
+
+
+
+endmodule

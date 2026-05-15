@@ -1,0 +1,1033 @@
+module ahb_slave_if_i2c #(
+  parameter AW       = 32	  	// Address width
+ // parameter WS_N     = 0, 	  	// First access wait state
+ // parameter WS_S     = 0  	  	// Subsequent access wait state
+ ) 
+ (
+  input wire 	      HCLK, // Clock
+  input wire 	      HRESETn, // Reset
+  input wire 	      I2CM_sw_rstn, // Reset
+  input wire 	      I2CS_sw_rstn, // Reset
+  input wire 	      HSEL, // Device select
+  input wire [AW-1:0] HADDR, // Address
+  input wire [1:0]    HTRANS, // Transfer control
+  input wire [2:0]    HSIZE, // Transfer size
+  input wire 	      HWRITE, // Write control
+  input wire [AW-1:0]   HWDATA, // Write data
+  input wire 	      HREADY, // Transfer phase done
+  output wire 	      HREADYOUT, // Device ready
+  output reg [AW-1:0]  HRDATA, // Read data output
+  output wire 	      HRESP, // Device response (always OKAY)
+// Modified Sharmi 26.04.25
+`ifdef S9P4_DFT_ENABLE	
+   input dft_test_mode,
+`endif
+//Signals to controller
+  
+  input wire	[AW-1:0]	M_TX_FIFO_STATUS,    	// I2C_TX_FIFO_STATUS 
+  input wire 	[AW-1:0]	M_RX_FIFO_STATUS,   	// I2C_RX_FIFO_STATUS
+  input wire	[AW-1:0]	S_TX_FIFO_STATUS,    	// I2C_TX_FIFO_STATUS 
+  input wire 	[AW-1:0]	S_RX_FIFO_STATUS,   	// I2C_RX_FIFO_STATUS 
+  input wire 	[7:0]  RD, 					// Input data  
+  input wire	[7:0]  RD_S,
+  input wire		stop_state,
+  input wire	[1:0]	ack,
+  input wire	[1:0]	no_ack,
+ // output reg 	[AW-1:0] I2C_CTRL_REG, 			// CONFIG_REG
+  output reg 	[1:0]	clear_ack,  // for clearing no_ack in i2c master 18/1/2021
+  output reg		[2:0] 	HSIZE_OUT,
+  output reg 	[AW-1:0]  TD,
+  output reg    [AW-1:0]  TD_S,
+  output reg 			DAV,
+  output reg			DAV_S,
+  //output reg		 flag,
+  output reg		[31:0] I2C_divider,
+  output reg 		clear_tx_over_run,  	// for clearing the over_run condition of TX_FIFO
+  output reg 		clear_rx_over_run,	// for clearing the over_run condition of RX_FIFO
+  output reg 		clear_tx_under_run,	// for clearing the under_run condition of RX_FIFO
+  output reg 		clear_rx_under_run,	// for clearing the under_run condition of RX_FIFO
+  output reg 		clear_slave_tx_over_run,  	// for clearing the over_run condition of TX_FIFO
+  output reg 		clear_slave_rx_over_run,	// for clearing the over_run condition of RX_FIFO
+  output reg 		clear_slave_tx_under_run,	// for clearing the under_run condition of RX_FIFO
+  output reg 		clear_slave_rx_under_run,	// for clearing the under_run condition of RX_FIFO
+  output reg [31:0]      I2C_CTRL_REG,
+  output reg 		begin_transfer,
+  output wire 		masked_i2c_slave_interrupt,   // i2c slave masking register edited by CH Pavan on 08/01/2021
+  output wire  		masked_i2c_master_interrupt,    // i2c master masking register edited by CH Pavan on 08/01/2021
+  output     [127:0]    debug_ahb_i2c
+ ); 
+
+
+// Internal signals
+  wire    		hreadyout_ta;
+  wire 	      	o_hsel2;
+  wire         	read_valid;       	// Address phase read valid
+  wire         	write_valid;      	// Address phase write valid
+  reg          	read_enable;      	// Data phase read enable
+  reg          	write_enable;     	// Data phase write enable
+  reg  [3:0]   	next_byte_lane;   	// Next state of reg_byte_lane 
+  reg  [AW-1:0] word_addr;          	// Word aligned address
+  wire [AW-1:0] nxt_word_addr;      	// Word aligned address
+  wire	      	rdata_valid1; 		// for master
+  wire			rdata_valid2;		// for slave
+  reg 	[AW-1:0]	I2C_TX_DATA;		// I2C_TX_DATA
+  reg	[AW-1:0]	I2C_RX_DATA;		// I2C_RX_DATA
+  reg 	[AW-1:0] 	I2C_TX_FIFO_STATUS_reg;
+  reg 	[AW-1:0]	I2C_RX_FIFO_STATUS_reg;
+  reg 	[AW-1:0]   I2C_divider_reg;
+
+  reg 	[AW-1:0] 	I2C_S_TX_FIFO_STATUS_reg;
+  reg 	[AW-1:0]	I2C_S_RX_FIFO_STATUS_reg;
+  
+  reg 	[AW-1:0]	I2C_S_TX_DATA;		// I2C_S_TX_DATA
+  reg	[AW-1:0]	I2C_S_RX_DATA;		// I2C_S_RX_DATA
+
+  reg   [31:0]          I2C_MASTER_MASK_REG;  // i2c master masking register edited by CH Pavan on 08/01/2021
+  reg   [31:0]          I2C_SLAVE_MASK_REG;  //  i2c slave masking register   edited by CH Pavan on 08/01/2021
+
+
+  wire	[AW-1:0] addr_wr;
+  wire	[AW-1:0] addr_rd;
+  wire		     ahb_cs_all;
+  
+  reg [31:0] I2C_STATUS_REG;
+
+  reg 	[AW-1:0] 	 HADDR1;
+
+
+// Modified Sharmi 26.04.25
+wire dft_reset_ctrl_mux_18, dft_reset_ctrl_mux_19;
+
+ wire full_tx,empty_tx;
+ wire full_rx,empty_rx;
+
+// reg 	[AW-1:0]	I2C_CTRL_REG;
+
+  wire full_s_tx ;
+  wire empty_s_tx;
+ 
+  wire full_s_rx ;
+  wire empty_s_rx;
+ 
+ wire hreadyout_ta_s ;
+
+//assign I2C_TX_FIFO_STATUS_reg = M_TX_FIFO_STATUS;
+//assign I2C_RX_FIFO_STATUS_reg = M_RX_FIFO_STATUS;
+//assign 	I2C_S_TX_FIFO_STATUS_reg = S_TX_FIFO_STATUS;
+//assign I2C_S_RX_FIFO_STATUS_reg = S_RX_FIFO_STATUS;
+
+//assign HSIZE_OUT = HSIZE;
+
+always@(posedge HCLK or negedge HRESETn)
+begin
+	if(!HRESETn)
+		HSIZE_OUT <= 0;
+	else if(HSEL && (HADDR[15:0] == 16'h2808))
+		HSIZE_OUT <= HSIZE;
+	else if(HSEL && (HADDR[15:0] == 16'h240C))
+		HSIZE_OUT <= HSIZE;
+
+end
+
+reg [2:0] HSIZE_int;
+always@(posedge HCLK or negedge HRESETn)
+begin
+	if(!HRESETn)
+		HSIZE_int <= 0;
+	else if(HSEL && (HADDR[4:2] <= 3'b100) )
+		HSIZE_int <= HSIZE;
+end
+
+
+/////////////////////////////////////////////////////////////////
+///////////              REGISTER BANKS               /////////// 
+/////////////////////////////////////////////////////////////////
+
+ `ifdef S9P4_DFT_ENABLE
+assign dft_reset_ctrl_mux_19 = (~HRESETn | ~I2CM_sw_rstn);
+assign  m_rstn = dft_test_mode ? !HRESETn :dft_reset_ctrl_mux_19 ;
+ `else
+assign m_rstn = (~HRESETn | ~I2CM_sw_rstn);
+ `endif
+// Modified Sharmi
+// --------> For Master
+
+always @(posedge HCLK or posedge m_rstn)
+	begin
+	
+      if(m_rstn)
+			begin
+				I2C_CTRL_REG 			<= 32'd0;
+				I2C_TX_FIFO_STATUS_reg	<= 32'h0000_001D;	// GLS reset issue,  JIRA- SHIP7-747
+				I2C_RX_FIFO_STATUS_reg	<= 32'h0000_001D;	// GLS reset issue,  JIRA- SHIP7-747
+				I2C_TX_DATA				<= 32'd0;
+				I2C_divider_reg			<= 32'd2;
+				I2C_MASTER_MASK_REG <= 32'h00007F7F;
+				I2C_STATUS_REG <= {28'd0, 4'b1111};
+				clear_ack <= 2'b11;
+
+			end
+		
+		else
+			begin
+				case({addr_wr[9:8], addr_wr[3:0]})
+				
+					6'b010000		:	begin
+											if(write_enable & ~begin_transfer)
+												I2C_CTRL_REG <= {3'd0,HWDATA[28:16],HWDATA[15:8],1'b0,1'b0,HWDATA[5:0]};
+											else
+												I2C_CTRL_REG <= I2C_CTRL_REG;
+									end																					
+					
+					6'b010001		:	begin	
+											I2C_TX_FIFO_STATUS_reg <= M_TX_FIFO_STATUS;
+											
+											if(HWDATA[5] && write_enable)
+												clear_tx_over_run <= 1'b1;
+											if(HWDATA[6] && write_enable)
+												clear_tx_under_run <= 1'd1;
+											else
+												begin
+													clear_tx_over_run <= 1'b0;
+													clear_tx_under_run <= 1'b0;
+												end
+										end
+
+					6'b010010 		: 	begin
+											I2C_RX_FIFO_STATUS_reg <= M_RX_FIFO_STATUS;
+											
+											if(HWDATA[5] && write_enable)
+												clear_rx_over_run <= 1'b1;
+											if(HWDATA[6] && write_enable)
+												clear_rx_under_run <= 1'b1;
+											else
+												begin
+													clear_rx_over_run <= 1'b0;
+													clear_rx_under_run <= 1'b0;
+												end
+										end
+
+					
+					6'b010011		:	if(write_enable)
+										I2C_TX_DATA <= HWDATA;
+									else
+										I2C_TX_DATA <= 32'd0;
+					
+					6'b010101		:	if(write_enable)
+										I2C_divider_reg <= HWDATA;
+									else
+										I2C_divider_reg <= I2C_divider_reg;
+
+					6'b010111               :       if(write_enable)
+									I2C_MASTER_MASK_REG <= {16'h00,HWDATA[15:0]};
+
+					6'b011000		:  	begin
+									     if(no_ack == (2'b00 | 2'b01 | 2'b10))
+										begin
+									 	 if(write_enable && HWDATA[1:0] == 2'b11)
+											clear_ack <= 2'b00;
+										 else
+											clear_ack <= clear_ack;	
+										end
+									     else
+										   clear_ack <= clear_ack;
+										   I2C_STATUS_REG <= {28'd0, ack, no_ack};
+									end				
+					
+					default :	begin
+									I2C_TX_FIFO_STATUS_reg	        <= I2C_TX_FIFO_STATUS_reg;
+									I2C_RX_FIFO_STATUS_reg	        <= I2C_RX_FIFO_STATUS_reg;
+									I2C_TX_DATA			<= 32'd0;
+									I2C_divider_reg			<= I2C_divider_reg;
+						                  	I2C_MASTER_MASK_REG 		<= I2C_MASTER_MASK_REG;
+									I2C_STATUS_REG 		  	<= {28'd0, ack, no_ack};
+									clear_ack 			<= 2'b11;
+									if(stop_state)
+										I2C_CTRL_REG <= 'b0;
+									else
+										I2C_CTRL_REG <= I2C_CTRL_REG;
+
+				                               	end
+		
+				endcase
+			end
+		
+	end
+
+
+reg end_transfer;
+always@(posedge HCLK or posedge m_rstn)
+begin
+  if(m_rstn)
+	end_transfer <= 1'b0;
+  else if(stop_state)
+	end_transfer <= 1'b1;
+  else
+	end_transfer <= 1'b0;
+end
+
+always@(posedge HCLK or posedge m_rstn)
+begin
+ if(m_rstn)
+	begin_transfer <= 1'b0;
+ else if(end_transfer)
+	begin_transfer <= 1'b0;
+ else
+   begin
+	case({addr_wr[9:8], addr_wr[2:0]})
+		5'b01110	:	if(HWDATA[0] && write_enable)
+					begin
+						if(~begin_transfer)
+							begin_transfer <= 1'b1;
+						else
+							begin_transfer <= begin_transfer;
+					end
+		default  	: 		begin_transfer <= begin_transfer;
+
+	endcase
+  end
+end
+
+// -------------------------------- Interrupt Mask ----------------- //
+// I2C_MASTER TX_FIFO
+
+wire masked_m_tx_output;
+wire empty_m_tx_masked;    
+wire full_m_tx_masked;  
+wire atleast4_m_tx_masked;	
+wire atleast2_m_tx_masked;	
+wire atleast1_m_tx_masked;
+wire under_run_m_tx_masked;
+wire over_run_m_tx_masked;
+ 
+assign masked_m_tx_output = ((empty_m_tx_masked)|(full_m_tx_masked)|(atleast4_m_tx_masked)|(atleast2_m_tx_masked)|(atleast1_m_tx_masked)|(under_run_m_tx_masked)|(over_run_m_tx_masked));
+
+assign empty_m_tx_masked       = (!I2C_MASTER_MASK_REG[0]) & (M_TX_FIFO_STATUS[0]);
+assign full_m_tx_masked        = (!I2C_MASTER_MASK_REG[1]) & (M_TX_FIFO_STATUS[1]);
+assign atleast4_m_tx_masked    = (!I2C_MASTER_MASK_REG[2]) & (M_TX_FIFO_STATUS[2]);
+assign atleast2_m_tx_masked    = (!I2C_MASTER_MASK_REG[3]) & (M_TX_FIFO_STATUS[3]);
+assign atleast1_m_tx_masked    = (!I2C_MASTER_MASK_REG[4]) & (M_TX_FIFO_STATUS[4]);
+assign under_run_m_tx_masked   = (!I2C_MASTER_MASK_REG[5]) & (M_TX_FIFO_STATUS[5]);
+assign over_run_m_tx_masked    = (!I2C_MASTER_MASK_REG[6]) & (M_TX_FIFO_STATUS[6]);
+
+// I2C MASTER RX FIFO
+
+wire masked_m_rx_output;
+wire empty_m_rx_masked;    
+wire full_m_rx_masked;     
+wire atleast4_m_rx_masked;	
+wire atleast2_m_rx_masked;	
+wire atleast1_m_rx_masked; 
+wire under_run_m_rx_masked;
+wire over_run_m_rx_masked;
+ 
+assign masked_m_rx_output = ((empty_m_rx_masked)|(full_m_rx_masked)|(atleast4_m_rx_masked)|(atleast2_m_rx_masked)|(atleast1_m_rx_masked)|(under_run_m_rx_masked)|(over_run_m_rx_masked));
+
+assign empty_m_rx_masked       = (!I2C_MASTER_MASK_REG[8]) & (M_RX_FIFO_STATUS[0]);
+assign full_m_rx_masked        = (!I2C_MASTER_MASK_REG[9]) & (M_RX_FIFO_STATUS[1]);
+assign atleast4_m_rx_masked    = (!I2C_MASTER_MASK_REG[10]) & (M_RX_FIFO_STATUS[2]);
+assign atleast2_m_rx_masked    = (!I2C_MASTER_MASK_REG[11]) & (M_RX_FIFO_STATUS[3]);
+assign atleast1_m_rx_masked    = (!I2C_MASTER_MASK_REG[12]) & (M_RX_FIFO_STATUS[4]);
+assign under_run_m_rx_masked   = (!I2C_MASTER_MASK_REG[13]) & (M_RX_FIFO_STATUS[5]);
+assign over_run_m_rx_masked    = (!I2C_MASTER_MASK_REG[14]) & (M_RX_FIFO_STATUS[6]);
+
+// final output for i2c master masked interrupt
+
+assign masked_i2c_master_interrupt = ((masked_m_rx_output) | (masked_m_tx_output));
+
+// I2C SLAVE TX FIFO
+
+wire masked_s_tx_output;
+wire empty_s_tx_masked;    
+wire full_s_tx_masked;     
+wire atleast4_s_tx_masked;	
+wire atleast2_s_tx_masked;	
+wire atleast1_s_tx_masked;
+wire under_run_s_tx_masked;
+wire over_run_s_tx_masked ;
+
+assign masked_s_tx_output = ((empty_s_tx_masked)|(full_s_tx_masked)|(atleast4_s_tx_masked)|(atleast2_s_tx_masked)|(atleast1_s_tx_masked)|(under_run_s_tx_masked)|(over_run_s_tx_masked));
+
+assign empty_s_tx_masked       = (! I2C_SLAVE_MASK_REG[0]) & (S_TX_FIFO_STATUS[0]);
+assign full_s_tx_masked        = (! I2C_SLAVE_MASK_REG[1]) & (S_TX_FIFO_STATUS[1]);
+assign atleast4_s_tx_masked    = (! I2C_SLAVE_MASK_REG[2]) & (S_TX_FIFO_STATUS[2]);
+assign atleast2_s_tx_masked    = (! I2C_SLAVE_MASK_REG[3]) & (S_TX_FIFO_STATUS[3]);
+assign atleast1_s_tx_masked    = (! I2C_SLAVE_MASK_REG[4]) & (S_TX_FIFO_STATUS[4]);
+assign under_run_s_tx_masked   = (! I2C_SLAVE_MASK_REG[5]) & (S_TX_FIFO_STATUS[5]);
+assign over_run_s_tx_masked    = (! I2C_SLAVE_MASK_REG[6]) & (S_TX_FIFO_STATUS[6]);
+
+// I2C SLAVE RX FIFO
+
+wire masked_s_rx_output;
+wire empty_s_rx_masked;    
+wire full_s_rx_masked;     
+wire atleast4_s_rx_masked;	
+wire atleast2_s_rx_masked;	
+wire atleast1_s_rx_masked;
+wire under_run_s_rx_masked;
+wire over_run_s_rx_masked; 
+
+assign masked_s_rx_output = ((empty_s_rx_masked)|(full_s_rx_masked)|(atleast4_s_rx_masked)|(atleast2_s_rx_masked)|(atleast1_s_rx_masked)|(under_run_s_rx_masked)|(over_run_s_rx_masked));
+
+assign empty_s_rx_masked       = (! I2C_SLAVE_MASK_REG[8]) & (S_RX_FIFO_STATUS[0]);
+assign full_s_rx_masked        = (! I2C_SLAVE_MASK_REG[9]) & (S_RX_FIFO_STATUS[1]);
+assign atleast4_s_rx_masked    = (! I2C_SLAVE_MASK_REG[10]) & (S_RX_FIFO_STATUS[2]);
+assign atleast2_s_rx_masked    = (! I2C_SLAVE_MASK_REG[11]) & (S_RX_FIFO_STATUS[3]);
+assign atleast1_s_rx_masked    = (! I2C_SLAVE_MASK_REG[12]) & (S_RX_FIFO_STATUS[4]);
+assign under_run_s_rx_masked   = (! I2C_SLAVE_MASK_REG[13]) & (S_RX_FIFO_STATUS[5]);
+assign over_run_s_rx_masked    = (! I2C_SLAVE_MASK_REG[14]) & (S_RX_FIFO_STATUS[6]);
+
+// final output for i2c slave masked interrupt
+
+assign masked_i2c_slave_interrupt = ((masked_s_rx_output) | (masked_s_tx_output));
+
+// Modified Sharmi
+ `ifdef S9P4_DFT_ENABLE
+     assign  dft_reset_ctrl_mux_18 = (~HRESETn | ~I2CS_sw_rstn);
+     assign  s_rstn = dft_test_mode ? !HRESETn : dft_reset_ctrl_mux_18 ;
+// For Slave
+ `else
+     assign s_rstn = (~HRESETn | ~I2CS_sw_rstn);
+ `endif
+
+
+always @(posedge HCLK or posedge s_rstn)
+	begin
+	
+      if(s_rstn)
+			begin
+				I2C_S_TX_FIFO_STATUS_reg<= 32'h0000_001D;	// GLS reset issue, JIRA- SHIP7-747
+				I2C_S_RX_FIFO_STATUS_reg<= 32'h0000_001D;	// GLS reset issue, JIRA- SHIP7-747
+				I2C_S_TX_DATA			<= 32'd0;
+				I2C_SLAVE_MASK_REG <=  32'h00007F7F;
+
+
+			end
+		
+		else
+			begin
+				case({addr_wr[9:8], addr_wr[2:0]})
+				
+					5'b10000		:	begin
+											I2C_S_TX_FIFO_STATUS_reg <= S_TX_FIFO_STATUS;
+											
+											if(HWDATA[5] && write_enable)
+												clear_slave_tx_over_run <= 1'b1;
+											if(HWDATA[6] && write_enable)
+												clear_slave_tx_under_run <= 1'd1;
+											else
+												begin
+													clear_slave_tx_over_run <= 1'b0;
+													clear_slave_tx_under_run <= 1'b0;
+												end
+										end
+									
+					5'b10001		:	begin
+											I2C_S_RX_FIFO_STATUS_reg <= S_RX_FIFO_STATUS;
+											
+											if(HWDATA[5] && write_enable)
+												clear_slave_rx_over_run <= 1'b1;
+											if(HWDATA[6] && write_enable)
+												clear_slave_rx_under_run <= 1'd1;
+											else
+												begin
+													clear_slave_rx_over_run <= 1'b0;
+													clear_slave_rx_under_run <= 1'b0;
+												end
+										end
+									
+					5'b10010		:	if(write_enable)
+										I2C_S_TX_DATA <= HWDATA;
+									else
+										I2C_S_TX_DATA <= 32'd0;
+
+					5'b10100               :       if(write_enable)
+									I2C_SLAVE_MASK_REG  <= {16'h00,HWDATA[15:0]};
+					
+									
+					default :	begin
+									I2C_S_TX_FIFO_STATUS_reg<= I2C_S_TX_FIFO_STATUS_reg;
+									I2C_S_RX_FIFO_STATUS_reg<= I2C_S_RX_FIFO_STATUS_reg;
+									I2C_S_TX_DATA			<= 32'd0;
+									I2C_SLAVE_MASK_REG <=  I2C_SLAVE_MASK_REG;
+
+								end
+					
+				endcase
+			end
+		
+	end
+
+
+//////////////////////////////////////////////////////////////////////////////////
+// For Master
+always @(posedge HCLK or posedge m_rstn)
+	begin
+	
+      if(m_rstn)
+			begin
+				I2C_RX_DATA 			<= 32'd0;
+			end
+		
+		else
+			begin
+			
+				case({addr_rd[9:8], addr_rd[2:0]})
+					
+					5'b01100		:	if(~empty_rx && ~HWRITE && HSEL)
+										
+										begin
+															I2C_RX_DATA <= {24'd0,RD[7:0]};		 // Whole word
+											
+										end
+					
+					
+									else	
+										I2C_RX_DATA <= 32'd0;
+										
+									
+					default :	begin	
+									I2C_RX_DATA <= 32'd0;
+								end
+					
+				endcase
+			end
+		
+	end
+
+// For Slave
+always @(posedge HCLK or posedge s_rstn)
+	begin
+	
+      if(s_rstn)
+			begin
+				I2C_S_RX_DATA			<= 32'd0;
+			end
+		
+		else
+			begin
+			
+				case({addr_rd[9:8], addr_rd[2:0]})
+					
+										
+					6'b10011		:	if(~empty_s_rx && ~HWRITE && HSEL)
+										
+										begin
+															I2C_S_RX_DATA <= {24'd0, RD_S[7:0]};		 // Whole word
+											
+										end
+					
+					
+									else	
+										I2C_S_RX_DATA <= 32'd0;
+									
+					default :	begin	
+									I2C_S_RX_DATA <= 32'd0;
+								end
+					
+				endcase
+			end
+		
+	end
+
+
+/////////////////////////////////////////////////////////////////
+///////////            FOR HREADYOUT SIGNAL           /////////// 
+/////////////////////////////////////////////////////////////////
+wire o_hsel3;
+reg hsel2_rd_dly, hsel3_rd_dly;
+always @(posedge HCLK or negedge HRESETn)
+begin
+    if (~HRESETn)
+	hsel2_rd_dly <= 1'b0;
+    else if ( ~HWRITE && o_hsel2 ) 
+		hsel2_rd_dly <= 1'b1;
+	 else
+		hsel2_rd_dly <= 1'b0;
+end
+
+always @(posedge HCLK or negedge HRESETn)
+begin
+    if (~HRESETn)
+	hsel3_rd_dly <= 1'b0;
+    else if ( ~HWRITE && o_hsel3 ) 
+		hsel3_rd_dly <= 1'b1;
+	 else
+		hsel3_rd_dly <= 1'b0;
+end
+
+assign o_hsel2   = (read_valid || write_valid) && (HADDR >= 32'h5000_2400) && (HADDR <= 32'h5000_27FF);	//master
+assign o_hsel3   = (read_valid || write_valid) && (HADDR >= 32'h5000_2800) && (HADDR <= 32'h5000_2BFF); // slave
+assign rdata_valid1 = ~hsel2_rd_dly && hreadyout_ta;
+assign rdata_valid2 = ~hsel3_rd_dly && hreadyout_ta_s;
+// Connect to top level
+assign HREADYOUT = ((rdata_valid1 && ~full_tx) || (rdata_valid2 && ~full_s_tx))  ? 1'b1 : 1'b0;
+assign HRESP     = 1'b0; 					// Always response with OKAY
+
+
+///////////////////////////////////////////////////////////////////
+///////////  Registering control signals to data phase  /////////// 
+///////////////////////////////////////////////////////////////////
+
+
+always @(posedge HCLK or negedge HRESETn)
+begin
+    if (~HRESETn)
+    begin
+      read_enable   <= 1'b0;
+      write_enable  <= 1'b0;
+      word_addr     <= {AW{1'b0}};
+    end
+    else if (HREADY)			// latch the control signals at address phase on the bus, original
+    begin
+      read_enable   <= read_valid;
+      write_enable  <= write_valid;
+      word_addr     <= nxt_word_addr;	
+    end
+
+end
+
+assign read_valid  = HSEL & HREADY & HTRANS[1] & (~HWRITE);	// Generate read control  (address phase)
+assign write_valid = HSEL & HREADY & HTRANS[1] & HWRITE;	// Generate write control (address phase)
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+assign nxt_word_addr = HADDR[AW-1:2];			// get rid of first 1 bits here
+
+
+assign addr_wr = write_enable ? word_addr : nxt_word_addr; 	// use latched address
+assign addr_rd = read_valid   ? nxt_word_addr : word_addr;  	// use address right away
+
+reg [31:0] HADDR2;
+always@(posedge HCLK or negedge HRESETn)
+begin
+		if(~HRESETn)
+		 begin
+			HADDR1 <= 0;
+			HADDR2 <= 0;
+		 end
+		else
+		 begin
+			HADDR1 <= HADDR;
+			HADDR2 <= HADDR1;
+		 end
+end
+
+///////////////////////////////////////////////////////////////////
+///////////  BYTE LANE SELECTION AND TD ASSIGNMENT  /////////////// 
+///////////////////////////////////////////////////////////////////
+
+always @(*)
+begin
+  if (read_valid | write_valid)
+    begin
+    case (HSIZE)
+      2'd0 :                                               // Byte
+        begin
+        case (HADDR1[1:0])
+          2'd0: begin
+				next_byte_lane 	= 4'b0001; 				// Byte 0
+			 end
+          2'd1: begin
+				next_byte_lane 	= 4'b0010;                  // Byte 1 word_addr
+			 end
+          2'd2: begin
+				next_byte_lane 	= 4'b0100;                  // Byte 2
+			 end
+          2'd3: begin
+				next_byte_lane	= 4'b1000;                  // Byte 3
+			 end
+          default:	begin
+						next_byte_lane = 4'b0000;             // Address not valid
+					end
+        endcase
+        end
+
+      2'd1 :                                               // Halfword
+        begin
+        if (HADDR1[1])
+			begin
+				next_byte_lane 	= 4'b1100;				// Upper halfword
+			end
+			
+        else
+			begin
+				next_byte_lane 	= 4'b0011;                     // Lower halfword
+			end
+        end
+
+      default :  											// Word
+				begin
+					next_byte_lane 	= 4'b1111;                       // Whole word
+				end
+    endcase
+    end
+
+  else
+
+    next_byte_lane = 4'b0000;                           // Not reading
+end
+
+///////////////////////////////////////////////////////////////////
+///////////                   TD LOGIC              /////////////// 
+///////////////////////////////////////////////////////////////////
+reg write_valid_1,write_valid_2;
+always@(posedge HCLK or negedge HRESETn)
+	begin
+		if(~HRESETn)
+			begin
+			write_valid_1 <= 0;
+			write_valid_2 <= 0;
+			end
+		else
+			begin
+			write_valid_1 <= write_valid;
+			write_valid_2 <= write_valid_1;
+			end
+	end
+// ------------------------ TD --------------------------- //
+always @(*)
+
+	begin
+	  if (read_valid | write_valid_2)
+		begin
+			case({HADDR2[11:10], HADDR2[4:2]})
+			
+				5'b01000:	TD	=	I2C_CTRL_REG;
+				
+				5'b01011: begin
+							case (HSIZE_OUT)
+							  2'd0 :                                               // Byte
+								begin
+								case (HADDR2[1:0])
+								  2'd0: begin	
+										TD 				= {24'd0,I2C_TX_DATA[7:0]};		// Byte 0
+									 end
+								  2'd1: begin
+										TD				= {24'd0,I2C_TX_DATA[15:8]};		// Byte 1 word_addr
+									 end
+								  2'd2: begin
+										TD				= {24'd0,I2C_TX_DATA[23:16]};		// Byte 2
+									 end
+								  2'd3: begin
+										TD				= {24'd0,I2C_TX_DATA[31:24]};		// Byte 3
+									 end
+								  default:	begin
+												TD 			   = 32'd0;							// Address not valid
+											end
+								endcase
+								end
+
+							  2'd1 :                                               // Halfword
+								begin
+								if (HADDR2[1])
+									begin
+										TD				= {16'd0,I2C_TX_DATA[31:16]};		// Upper halfword
+									end
+									
+								else
+									begin
+										TD				= {16'd0,I2C_TX_DATA[15:0]};		// Lower halfword
+									end
+								end
+								
+
+							  default :  											// Word
+										begin
+											TD				=I2C_TX_DATA[31:0] ;		// Whole word
+										end
+							endcase
+						end
+				
+							
+				default	:	begin
+								TD   = 32'd0;
+							end
+			endcase
+		end
+
+	  else
+		begin
+				TD = 32'd0;                           
+		end
+	end
+
+// ------------------------------ TD_S ------------------------ //
+
+always @(*)
+
+	begin
+	  if (read_valid | write_valid_2)
+		begin
+			case({HADDR2[11:10], HADDR2[4:2]})
+			
+				5'b10010: begin
+							case (HSIZE_OUT)
+							  2'd0 :                                               // Byte
+								begin
+								case (HADDR2[1:0])
+								  2'd0: begin	
+										TD_S 				= {24'd0,I2C_S_TX_DATA[7:0]};		// Byte 0
+									 end
+								  2'd1: begin
+										TD_S				= {24'd0,I2C_S_TX_DATA[15:8]};		// Byte 1 word_addr
+									 end
+								  2'd2: begin
+										TD_S				= {24'd0,I2C_S_TX_DATA[23:16]};		// Byte 2
+									 end
+								  2'd3: begin
+										TD_S				= {24'd0,I2C_S_TX_DATA[31:24]};		// Byte 3
+									 end
+								  default:	begin
+												TD_S 			   = 32'd0;							// Address not valid
+											end
+								endcase
+								end
+
+							  2'd1 :                                               // Halfword
+								begin
+								if (HADDR2[1])
+									begin
+										TD_S				= {16'd0,I2C_S_TX_DATA[31:16]};		// Upper halfword
+									end
+									
+								else
+									begin
+										TD_S				= {16'd0,I2C_S_TX_DATA[15:0]};		// Lower halfword
+									end
+								end
+								
+
+							  default :  											// Word
+										begin
+											TD_S				=I2C_S_TX_DATA[31:0] ;		// Whole word
+										end
+							endcase
+					end
+				
+				default	:	begin
+								TD_S = 32'd0 ;
+							end
+			endcase
+		end
+
+	  else
+		begin
+				TD_S = 32'd0 ;
+		end
+	end
+
+
+
+always @(*)
+
+	begin
+	  if (read_valid | write_valid_2)
+		begin
+			case({HADDR2[11:10], HADDR2[4:2]})
+								
+				5'b01101: begin
+							case (HSIZE)
+							  2'd0 :                                               // Byte
+								begin
+								case (HADDR2[1:0])
+								  2'd0: begin	
+										I2C_divider 			= {I2C_divider_reg[7:0]};		// Byte 0
+									 end
+								  2'd1: begin
+										I2C_divider				= {I2C_divider_reg[15:8]};		// Byte 1 word_addr
+									 end
+								  2'd2: begin
+										I2C_divider				= {I2C_divider_reg[23:16]};		// Byte 2
+									 end
+								  2'd3: begin
+										I2C_divider				= {I2C_divider_reg[31:24]};		// Byte 3
+									 end
+								  default:	begin
+												I2C_divider 			   = 0;							// Address not valid
+											end
+								endcase
+								end
+
+							  2'd1 :                                               // Halfword
+								begin
+								if (HADDR2[1])
+									begin
+										I2C_divider				= {I2C_divider_reg[31:16]};		// Upper halfword
+									end
+									
+								else
+									begin
+										I2C_divider				= {I2C_divider_reg[15:0]};		// Lower halfword
+									end
+								end
+
+							  default :  											// Word
+										begin
+										I2C_divider				= I2C_divider_reg[31:0];		// Whole word
+										end
+							endcase
+					end
+				default	:	I2C_divider = I2C_divider_reg[31:0];	
+			endcase
+		end
+//	end
+
+	  else
+
+		I2C_divider = I2C_divider_reg[31:0];	                          // Not reading
+	end
+
+
+////////////////////////////////////////////////////////////////////
+
+ // assign HRDATA = I2C_RX_DATA;
+//////////////////////////////////////////////////////////////////////////////////
+
+always @(*)
+			begin
+				if(read_enable)
+
+					begin
+						case({addr_rd[9:8], addr_rd[3:0]})
+
+							6'b010000	:	HRDATA = I2C_CTRL_REG;
+							6'b010001	:	HRDATA = I2C_TX_FIFO_STATUS_reg;
+							6'b010010	:	HRDATA = I2C_RX_FIFO_STATUS_reg;
+							6'b010011	:	HRDATA = I2C_TX_DATA;
+							6'b010101	:	HRDATA = I2C_divider_reg;
+							6'b100000	:	HRDATA = I2C_S_TX_FIFO_STATUS_reg;
+							6'b100001	:	HRDATA = I2C_S_RX_FIFO_STATUS_reg;
+							6'b100010	:	HRDATA = I2C_S_TX_DATA;
+							6'b010100	:	HRDATA = I2C_RX_DATA;
+							6'b100011	:	HRDATA = I2C_S_RX_DATA;
+							6'b000110	:	HRDATA = {31'd0, begin_transfer};
+							6'b010111       :       HRDATA = I2C_MASTER_MASK_REG;
+							6'b100100       :       HRDATA = I2C_SLAVE_MASK_REG;
+							6'b011000	:	HRDATA = {28'd0, ack, no_ack};
+							default		:	HRDATA = 32'd0;
+
+						endcase
+					end
+
+				else
+					HRDATA = 32'd0;
+			end
+
+
+
+ assign full_tx 	= M_TX_FIFO_STATUS[1];
+ assign empty_tx	= M_TX_FIFO_STATUS[0];
+ 
+ assign full_rx 	= M_RX_FIFO_STATUS[1];
+ assign empty_rx	= M_RX_FIFO_STATUS[0];
+ 
+ assign full_s_tx 	= S_TX_FIFO_STATUS[1];
+ assign empty_s_tx	= S_TX_FIFO_STATUS[0];
+ 
+ assign full_s_rx 	= S_RX_FIFO_STATUS[1];
+ assign empty_s_rx	= S_RX_FIFO_STATUS[0];
+ 
+ assign hreadyout_ta = ~full_tx;
+ assign hreadyout_ta_s = ~full_s_tx;
+ //reg DAV_1, DAV_2;
+ 
+///////////////////////////////////////////////////////////////////
+///////////                   DAV SIGNAL            /////////////// 
+///////////////////////////////////////////////////////////////////
+//reg flag;
+/*always@(posedge HCLK or negedge HRESETn)
+	begin
+		if(~HRESETn)
+			flag <= 0;
+		//else if(addr_wr[2:0] == 3'b000 && addr_wr[9:8] == 2'd1)
+		else if(({addr_wr[9:8], addr_wr[2:0]} == 5'b01000) && write_enable)
+			flag <= 1'b1;
+		else
+			flag <= 1'b0;
+	end*/
+
+
+
+ 
+ always@(posedge HCLK or negedge HRESETn)
+	begin
+		if(~HRESETn)
+			DAV <= 1'b0;
+		else
+	//	if((~full_tx && write_enable && (HADDR1[11:10] == 2'd1) && (HADDR1[4:2] == 3'd0)) || (~full_tx && write_enable && (HADDR1[11:10] == 2'd1) && (HADDR1[4:2] == 3'd3)))
+	 	if(write_enable && (({HADDR1[11:10], HADDR1[4:2]} == 5'b01011)))
+			DAV <= 1'b1;
+		else
+			DAV <= 1'b0;
+	end
+	
+always@(posedge HCLK or negedge HRESETn)
+	begin
+		if(~HRESETn)
+			DAV_S <= 1'b0;
+		else
+		if(write_enable && (HADDR1[4:2] == 3'b010) && (HADDR1[11:10] == 2'd2))
+			DAV_S <= 1'b1;
+		else
+			DAV_S <= 1'b0;
+	end
+			
+			
+/*			
+ always@(posedge HCLK or negedge HRESETn)
+	begin
+		if(~HRESETn)
+		begin
+			DAV_1 <= 1'b0;
+			DAV_2 <= 0;
+		end
+		else
+			
+			begin
+				DAV_1 <= DAV;
+				DAV_2 <= DAV_1;
+			end
+	end
+*/
+/*
+reg state, next_state;
+
+parameter IDLE = 1'b0,
+			WRITE_EN = 1'b1;
+
+always@(posedge HCLK or negedge HRESETn)
+	begin
+		if(HRESETn)
+			state <= IDLE;
+		else
+			state <= next_state;
+			
+	end
+	
+always@(*)
+begin
+	next_state <= IDLE;
+	
+		case(state)
+		
+			IDLE	: if(~full_tx && HWRITE && flag)
+						next_state = WRITE_EN;
+						
+						else
+							next_state = IDLE;
+						
+			WRITE_EN : 	next_state = IDLE;
+			
+			default   : next_state = IDLE;
+			
+		endcase
+end
+*/
+//assign DAV = (state == WRITE_EN);		
+//
+
+assign debug_ahb_i2c = {1'b0,empty_s_rx,full_s_rx,empty_s_tx,full_s_tx,empty_rx,full_rx,empty_tx,full_tx,clear_slave_rx_under_run,clear_slave_tx_under_run,clear_slave_rx_over_run,clear_slave_tx_over_run,clear_rx_under_run,clear_tx_under_run,clear_rx_over_run,clear_tx_over_run,TD,masked_i2c_slave_interrupt,masked_i2c_master_interrupt,begin_transfer,DAV_S,DAV,clear_ack,HSIZE_OUT,HRESP,HRDATA,HREADYOUT,HADDR1,HSEL,HRESETn,HCLK};
+
+endmodule	
+

@@ -1,0 +1,684 @@
+module i2c_controller(
+	input wire clk,
+	input wire rst_n,
+	input wire [7:0] slave_addr,
+	input wire [7:0] data_in,
+	input wire enable,
+	`ifdef S9P4_DFT_ENABLE
+        input dft_test_mode, // Modified Sharmi
+	`endif
+	input wire [5:0] length,
+	input wire [31:0] DIVIDE_BY,//---> width increased to support the fast mode
+
+	input i2c_sda_in,
+	output i2c_sda_out,
+	output wire i2c_scl,  
+	output reg tx_re,
+	output reg rx_we,
+	output reg [7:0] data_out,
+	output reg stop_state_detect,
+	
+	input      [5:0] lfrs_master,  // added on 18/01/2021
+        input            re_start_master,  // added on 18/01/2021
+	input            re_wr_re,  // added on 18/01/2021
+	input 	   [1:0] clear_signal, // addes on 18/01/2021
+	output reg [1:0] ack_detect,no_ack_detect, // added on 18/01/2021
+	output 	   [127:0] debug_i2c_master,
+	input               reset_slave
+	);
+
+	localparam IDLE = 0;
+	localparam START = 1;
+	localparam ADDRESS = 2;
+	localparam READ_ACK = 3;
+	localparam WRITE_DATA = 4;
+	localparam WRITE_ACK = 5;
+	localparam READ_DATA = 6;
+	localparam READ_ACK2 = 7;
+	localparam STOP = 8;
+	localparam WAIT_STATE = 9;
+	localparam REPEAT_START = 11;   // added on 18/01/2021
+	localparam ADDRESS_TEMP = 12;
+	localparam WRITE_DATA_TEMP = 13;
+	localparam READ_DATA_TEMP = 14;
+	localparam RESET_SLAVE = 15;
+	wire i2c_clk; // Modified Sharmi
+	reg [3:0] state,next_state;
+	reg [7:0] saved_addr;
+	reg [7:0] saved_data;
+	reg [3:0] counter;    
+	reg [31:0] counter2 ; 
+	reg write_enable;
+	reg sda_out_int;
+	reg i2c_scl_enable;
+	reg i2c_clk1 ;
+	reg [5:0] current_length,re_start_current_length;
+	reg no_ack;
+	reg [7:0] saved_addr_int, saved_data_int;	
+	reg repeat_start,repeat_start_int; // added on 18/1/2021
+	assign i2c_scl = (i2c_scl_enable == 0 ) ? 1 : i2c_clk;
+	assign i2c_sda_out = (state == STOP) ? 1'b0 : (write_enable == 1) ? sda_out_int : 1'b1;
+	
+
+	//wire i2c_clk; // Modified Sharmi
+	`ifdef S9P4_DFT_ENABLE
+        assign i2c_clk = dft_test_mode ? clk : i2c_clk1;  // For [3] bit control og debug bus
+        `else
+	assign i2c_clk = i2c_clk1;
+	`endif
+        
+ 
+// The below clk generator block is Modified Sharmi
+	always @(posedge clk or negedge rst_n) begin
+		if(!rst_n) begin
+			counter2 <= 32'd0;
+			i2c_clk1 <= 1'b1; // Modified / Renamed Sharmi
+		end
+		else if (counter2 == (DIVIDE_BY/2) - 1) begin
+			i2c_clk1 <= ~i2c_clk1; // Modified / Renamed Sharmi
+			counter2 <= 32'd0;
+		end
+		else if(DIVIDE_BY != 0)
+			 counter2 <= counter2 + 1;
+		else
+			counter2 <= 'b0; // as per discussion for code_coverage
+	end 
+
+
+always @(negedge i2c_clk or negedge rst_n) begin
+		if(rst_n == 0) begin
+			i2c_scl_enable <= 0;
+		end else begin
+			if ((state == IDLE) || (state == START) || (state == STOP) || state == REPEAT_START) begin
+				i2c_scl_enable <= 0;
+			end else begin
+				i2c_scl_enable <= 1;
+			end
+		end
+	end
+
+
+always@(posedge clk or negedge rst_n)
+begin
+	if(!rst_n)
+		stop_state_detect <= 1'b0;
+	else if(state == STOP)
+		stop_state_detect <= 1'b1;
+	else
+		stop_state_detect <= 1'b0;
+end
+
+////////// logic for ACK and NO_ACK detection ///
+
+always@(posedge clk or negedge rst_n) // need to implement if ack is there no_ack should be 11 use one  always block only 
+begin
+
+	if(!rst_n)
+	begin
+		ack_detect <= 2'b11;
+		no_ack_detect <= 2'b11;
+	end
+	else if(~clear_signal)
+	begin
+		no_ack_detect <= 2'b11;
+	end 
+	else if(state == IDLE)
+	begin
+		ack_detect <= 2'b11;
+	end
+	else if(state == READ_ACK && i2c_sda_in == 0 && i2c_scl == 0)
+	begin
+		ack_detect 	<= 2'b00;
+		no_ack_detect   <= 2'b11;
+	end
+	else if(state == READ_ACK2 && i2c_sda_in == 0 && i2c_scl == 0)
+	begin
+		ack_detect 	<= 2'b01;
+		no_ack_detect   <= 2'b11;
+	end
+	else if(state == WRITE_ACK && i2c_sda_out == 0 && i2c_scl == 0)
+	begin
+		ack_detect 	<= 2'b10;
+		no_ack_detect   <= 2'b11;
+	end
+	else if(state == READ_ACK && i2c_sda_in == 1 && i2c_scl == 0)
+	begin
+		ack_detect 	<= 2'b11;
+		no_ack_detect   <= 2'b00;
+	end
+	else if(state == READ_ACK2 && i2c_sda_in == 1 && i2c_scl == 0)
+	begin
+		ack_detect 	<= 2'b11;
+		no_ack_detect   <= 2'b01;
+	end
+	else if(state == WRITE_ACK && i2c_sda_out == 1 && i2c_scl == 0)
+	begin
+		ack_detect 	<= 2'b11;
+		no_ack_detect   <= 2'b10;
+	end
+	else
+	begin
+		ack_detect <= 2'b11;
+		no_ack_detect <= no_ack_detect;
+	end
+
+end
+
+//////////////////////// write fsm ////////////////
+
+parameter [1:0] RX_FIFO_IDLE = 2'd0,
+RX_WRITE_INTO_FIFO  = 2'd1,
+STOP_STATE = 2'd2;
+
+reg[1:0] rx_state,rx_next_state;
+
+always@(posedge clk or negedge rst_n)  
+   begin
+if(!rst_n)
+   rx_state <= RX_FIFO_IDLE;
+else
+   rx_state <= rx_next_state;
+end
+
+always@(*)
+    begin
+  rx_next_state = RX_FIFO_IDLE;
+    case(rx_state)
+            		RX_FIFO_IDLE : begin 
+					if(counter == 8'd7 && state == WRITE_ACK)
+                       				rx_next_state = RX_WRITE_INTO_FIFO;
+					else 
+						rx_next_state = RX_FIFO_IDLE;
+					end
+
+          		RX_WRITE_INTO_FIFO : begin
+						if( counter == 8'd7 && state == WRITE_ACK )  
+                				 rx_next_state = STOP_STATE;
+						else
+							rx_next_state = RX_FIFO_IDLE;
+						end
+
+   		       STOP_STATE : if(state != WRITE_ACK)
+					rx_next_state = RX_FIFO_IDLE;
+                    	    	else
+   					rx_next_state = STOP_STATE;
+
+			default : rx_next_state = RX_FIFO_IDLE;
+            endcase
+    end
+
+always@(posedge clk or negedge rst_n)
+    begin
+	if(!rst_n)
+	 begin
+ 	   rx_we <= 1'b0;
+ 	end
+        else
+             case(rx_state)
+ 			  RX_FIFO_IDLE : begin
+ 					   rx_we <= 1'b0;
+ 					end
+ 
+  		         RX_WRITE_INTO_FIFO : begin
+							rx_we <= 1'b1;
+						end
+    			STOP_STATE : begin
+					rx_we <=1'b0;
+				     end
+
+			default : rx_we <= 1'b0;
+        endcase
+end
+
+//////// read fsm //////
+parameter [1:0] TX_FIFO_IDLE = 2'd0,
+TX_READ_FROM_FIFO  = 2'd1,
+TX_STOP_STATE = 2'd2;
+
+reg[1:0] tx_state,tx_next_state;
+
+always@(posedge clk or negedge rst_n)  
+   begin
+if(!rst_n)
+   tx_state <= TX_FIFO_IDLE;
+else
+   tx_state <= tx_next_state;
+end
+
+always@(*)
+    begin
+  tx_next_state = TX_FIFO_IDLE;
+    case(tx_state)
+            		TX_FIFO_IDLE : begin 
+					if((counter == 8'd0 && state == ADDRESS_TEMP && slave_addr[0] == 0) || (counter == 8'd7 && state == READ_ACK2 && next_state != STOP))
+                       				tx_next_state = TX_READ_FROM_FIFO;
+					else 
+						tx_next_state = TX_FIFO_IDLE;
+					end
+
+          		TX_READ_FROM_FIFO : begin
+						if((counter == 8'd0 && state == ADDRESS_TEMP) || (counter == 8'd7 && state == READ_ACK2))  
+                				 	tx_next_state = TX_STOP_STATE;
+						else
+							tx_next_state = TX_FIFO_IDLE;
+						end
+
+   		       TX_STOP_STATE : if((state == ADDRESS_TEMP) || (state == READ_ACK2))
+					tx_next_state = TX_STOP_STATE;
+                    	    	else
+   					tx_next_state = TX_FIFO_IDLE;
+
+			default : tx_next_state = TX_FIFO_IDLE;
+            endcase
+    end
+
+always@(posedge clk or negedge rst_n)
+    begin
+	if(!rst_n)
+	 begin
+ 	   tx_re <= 1'b0;
+ 	end
+        else
+             case(tx_state)
+ 			  TX_FIFO_IDLE : begin
+ 					   tx_re <= 1'b0;
+ 					end
+ 
+  		         TX_READ_FROM_FIFO : begin
+							tx_re <= 1'b1;
+						end
+    			TX_STOP_STATE : begin
+					tx_re <=1'b0;
+				     end
+
+			default : tx_re <= 1'b0;
+        endcase
+end
+
+reg tx_re_det,tx_re_det1;
+always@(posedge clk or negedge rst_n)
+begin
+	if(!rst_n)
+		tx_re_det <= 'b0;
+	else if (tx_re)
+		tx_re_det <= 'b1;
+	else
+		tx_re_det <= 'b0;
+end
+
+always@(posedge clk or negedge rst_n)
+begin
+	if(!rst_n)
+		tx_re_det1 <= 'b0;
+	else 
+		tx_re_det1 <= tx_re_det;
+end
+
+always@(posedge clk or negedge rst_n)
+begin
+	if(!rst_n)
+		saved_addr_int <= 'b0;
+	else if(state == REPEAT_START && reset_slave == 0)
+		saved_addr_int <= {slave_addr[7:1],re_wr_re};
+	else if(state == STOP) 
+		saved_addr_int <= 'b0; 
+		
+end
+
+
+always@(posedge clk or negedge rst_n)
+begin
+	if(!rst_n)
+		saved_data_int <= 'b0;
+	else if(state == READ_ACK | (state == READ_ACK2 && tx_re_det1 == 1))
+		saved_data_int <= data_in;
+	else if(state == STOP)
+		saved_data_int <= 'b0;
+end
+
+always@(posedge clk or negedge rst_n)
+begin
+	if(!rst_n)
+		repeat_start_int <= 'b0;
+	else if(state == REPEAT_START)
+		repeat_start_int <= 'b1;
+	else if(state == STOP)
+		repeat_start_int <= 'b0;	
+end
+
+
+///////////////////////////////////////////////////
+
+always@(negedge i2c_clk or negedge rst_n)
+begin
+	if(rst_n == 0) 
+	begin
+			state <= IDLE;
+			saved_addr <= 'b0;
+			saved_data <= 'b0;
+	end		
+	else
+	begin
+		state <= next_state;
+		repeat_start <= repeat_start_int;
+		saved_addr <= saved_addr_int;
+		saved_data <= saved_data_int;	
+	end
+end
+
+always @(*)
+begin
+		next_state = IDLE;	
+		case(state)
+				IDLE: begin
+					if (enable) begin 
+						next_state = START;
+					end
+					else next_state = IDLE;
+				end
+			
+				START: begin
+					if(enable || length!=6'd0)
+   					begin
+					if(reset_slave == 0)
+						next_state = ADDRESS;
+					else
+						next_state = RESET_SLAVE;
+					end
+					else 
+					next_state = IDLE;
+				end
+
+				ADDRESS: begin
+					if (counter == 0) 
+						next_state = ADDRESS_TEMP;
+				       else next_state = ADDRESS; 
+				end
+		
+				ADDRESS_TEMP : begin 
+							next_state = READ_ACK;
+						end
+
+				READ_ACK: begin
+					if (i2c_sda_in == 0 ) begin
+						if(repeat_start_int == 0)
+						begin
+							if(slave_addr[0] == 0) next_state = WRITE_DATA;
+							else next_state = READ_DATA;
+						end
+						else begin
+							if(saved_addr_int[0] == 0) next_state = WRITE_DATA;
+							else next_state = READ_DATA;
+						end
+					end
+					else 
+						 next_state = STOP;
+				end
+
+				WRITE_DATA: begin
+					if((current_length < length  && repeat_start == 0) || ((re_start_current_length < lfrs_master && repeat_start == 1)))
+					begin
+						if(counter == 0) 
+							next_state = WRITE_DATA_TEMP; 
+						else
+							next_state = WRITE_DATA;
+					end
+					else next_state = STOP;
+				end
+
+				WRITE_DATA_TEMP : begin
+							next_state = READ_ACK2;
+						  end
+				
+				READ_ACK2: begin
+					if(((current_length + 1) < (length) && i2c_sda_in == 0 && repeat_start == 0) || (((re_start_current_length < lfrs_master) && i2c_sda_in == 0 && repeat_start == 1)))
+					begin
+							 next_state = WRITE_DATA;
+					end
+					else if(re_start_master == 1 && repeat_start == 0)
+					begin
+						next_state = REPEAT_START;
+					end
+					else next_state = STOP;
+				end
+
+				READ_DATA: begin
+					if((current_length < length && repeat_start == 0) || ((re_start_current_length < lfrs_master) && repeat_start == 1))
+					begin
+						if (counter == 0) next_state = READ_DATA_TEMP;
+						else
+							next_state = READ_DATA;
+					end
+					else next_state = STOP;
+				end
+
+				READ_DATA_TEMP : begin
+							next_state = WRITE_ACK; 
+		
+						 end
+				
+				WRITE_ACK: begin
+						if((current_length<(length - 1) && repeat_start == 0) || ((re_start_current_length < (lfrs_master - 1) && repeat_start == 1)))
+						begin
+							next_state = READ_DATA;
+						end
+						else 
+							next_state = STOP;
+				end
+
+				REPEAT_START : begin  
+							if(enable)
+							begin
+								if(reset_slave == 0)
+									next_state = ADDRESS;
+								else
+									next_state = STOP;
+							end
+							else
+								next_state = STOP;
+						end
+
+
+				STOP: begin
+					next_state = IDLE;
+				end
+
+				RESET_SLAVE : begin
+							if(counter == 0)
+								next_state = REPEAT_START;
+							else
+								next_state = RESET_SLAVE;
+					      end
+
+				default : next_state = IDLE;
+			endcase
+		end
+
+always @(negedge i2c_clk or  negedge rst_n) begin
+		if(rst_n == 0) begin
+			write_enable <= 0;
+			sda_out_int <= 1;
+			no_ack <= 1'b0;
+			counter <= 7;
+			current_length <= 'b0;
+			re_start_current_length <= 'b0;
+			data_out <= 'b0;
+		end else begin
+			case(state)
+				
+				START: begin
+					if(reset_slave == 0)
+						counter <= 7;
+					else
+						counter <= 9;
+					write_enable <= 1;
+					sda_out_int <= 0;
+				end
+				
+				ADDRESS: begin
+					write_enable <= 1'b1; // need to latch wr_enb
+						if(counter != 0)
+						begin
+							if(repeat_start_int == 0) 
+								sda_out_int <= slave_addr[counter];
+							else
+								sda_out_int <= saved_addr_int[counter];
+							counter <= counter - 1;
+						end
+						else 
+						begin
+							if(repeat_start_int == 0)
+								sda_out_int <= slave_addr[counter];
+							else
+								sda_out_int <= saved_addr_int[counter];
+						end
+				end
+		
+				ADDRESS_TEMP : begin
+							sda_out_int <= 1'b1;
+							write_enable <= 1'b1;
+							counter <= 7;
+						end	
+
+				
+				READ_ACK: begin
+					counter <= counter - 1;
+					write_enable <= 1;
+					if(slave_addr[0] == 0)
+						sda_out_int <= saved_data_int[counter];
+					else
+						sda_out_int <= 1'b1;
+				end
+				
+				WRITE_DATA: begin 
+					write_enable <= 1;
+					if((current_length < length) && repeat_start == 0)
+					begin
+						sda_out_int <= saved_data_int[counter];
+						if(counter > 0)
+						begin
+						counter <= counter - 1;
+						end
+					end
+					else if(re_start_current_length < lfrs_master && repeat_start == 1)
+					begin
+						sda_out_int <= saved_data_int[counter];
+						if(counter > 0)
+						begin
+						counter <= counter - 1;
+						end
+					end
+					else sda_out_int <= 0;
+				end
+
+				WRITE_DATA_TEMP : begin
+							sda_out_int <= 1'b1;
+							write_enable <= 1'b1;
+							counter <= 7;
+						  end
+
+				READ_DATA: begin
+						write_enable <= 1;
+						counter <= counter - 1;
+						sda_out_int <= 1;
+						if(current_length < length && repeat_start == 0)
+						begin
+							if(counter >= 0)begin
+							data_out[counter + 1] <= i2c_sda_in;
+							counter <= counter - 1;
+							end
+						end
+						else if(re_start_current_length < lfrs_master && repeat_start == 1)
+						begin
+							if(counter >= 0) begin
+							data_out[counter + 1] <= i2c_sda_in;
+							counter <= counter - 1;
+							end
+						end
+				end
+
+				READ_DATA_TEMP : begin
+							data_out[0] <= i2c_sda_in;
+							if(((current_length + 1) < length && repeat_start == 0) || (repeat_start == 1 && re_start_current_length < (lfrs_master - 1))) 
+							begin
+								write_enable <= 1'b1;	
+								sda_out_int <= 1'b0;
+							end
+							else begin
+								write_enable <= 1'b1;
+								sda_out_int <= 1'b1;
+							end	
+							counter <= 7;
+						  end
+				
+				WRITE_ACK: begin
+					counter <= counter - 1;
+					if((current_length + 1) < (length) && repeat_start == 0)
+					begin
+						write_enable <= 1;
+						sda_out_int <= 1;
+						current_length <= current_length + 1'b1;
+						
+					end
+					else  if(re_start_current_length < (lfrs_master - 1) && repeat_start == 1)
+					begin
+						write_enable <= 1;
+						sda_out_int <= 1;
+						re_start_current_length <= re_start_current_length + 1'b1;
+					end
+					else
+					begin
+						no_ack <= 1'b1;
+						write_enable <= 1'b1;
+						sda_out_int <= 1'b1; 
+					end
+				end
+
+
+				READ_ACK2 : begin
+						counter <= counter - 1;
+						write_enable <= 1'b1;
+						if( (current_length + 1) < (length) && i2c_sda_in == 0 && repeat_start == 0)
+						begin
+							sda_out_int <= saved_data_int[counter];
+							current_length <= current_length + 1'b1;
+						end
+						else
+						if((re_start_current_length < lfrs_master) && i2c_sda_in == 0 && repeat_start == 1)
+						begin
+							sda_out_int <= saved_data_int[counter];
+							re_start_current_length <= re_start_current_length + 1'b1;
+						end
+						else
+							sda_out_int <= 1;
+				end
+
+				REPEAT_START : begin  // REPEAT START added on 18/01/2021 
+							counter <= 7;
+							write_enable <= 1;
+							sda_out_int <= 0;
+						 end
+									
+				STOP: begin
+					re_start_current_length <= 0;
+					write_enable <= 0;
+					sda_out_int <= 0;
+					no_ack <= 1'b0;
+					current_length <= 0;
+				end
+
+				RESET_SLAVE : begin
+							write_enable <= 0;
+							if(counter !=0)
+								counter <= counter - 1;
+					      end
+
+			endcase
+		end
+	end
+
+
+
+assign debug_i2c_master = {13'd0,no_ack,tx_next_state,tx_state,rx_next_state,rx_state,data_out,counter,lfrs_master,re_start_current_length,current_length,length,write_enable,i2c_scl_enable,repeat_start_int,repeat_start,sda_out_int,saved_data_int,saved_addr_int,saved_data,saved_addr,next_state,state,no_ack_detect,ack_detect,clear_signal,re_wr_re,re_start_master,rx_we,tx_re,slave_addr,stop_state_detect,i2c_sda_out,i2c_sda_in,i2c_clk,enable,rst_n,clk};
+
+endmodule

@@ -1,0 +1,223 @@
+module ahb_i2c_top(HCLK, HRESETn, HSEL, HADDR, HTRANS, HSIZE, HWRITE, HWDATA, HREADY, HREADYOUT, HRDATA, HRESP,
+					i2c_sda_in, i2c_sda_out, i2c_scl, i2c_sda_slave_in, i2c_sda_slave_out, i2c_scl_slave_in, I2CM_sw_rstn, I2CS_sw_rstn,
+						I2CM_output_enable,I2CS_output_enable,I2CM_scl_enable,i2c_master_gated_clk,i2c_slave_gated_clk, masked_i2c_slave_interrupt, masked_i2c_master_interrupt,debug_ahb_i2c_bus,debug_bus_0,debug_bus_1,debug_bus_2,debug_bus_3,debug_bus_4,debug_bus_5,debug_bus_6,debug_bus_7,func_debug_mode_en
+`ifdef S9P4_DFT_ENABLE	
+, dft_test_mode
+`endif
+	);
+
+  input wire 	      HCLK; // Clock
+  input wire 	      HRESETn; // Reset
+`ifdef S9P4_DFT_ENABLE
+  input dft_test_mode; // Modified Sharmi
+`endif
+  input wire 	      HSEL; // Device select
+  input wire [31:0]	  HADDR; // Address
+  input wire [1:0]    HTRANS; // Transfer control
+  input wire [2:0]    HSIZE; // Transfer size
+  input wire 	      HWRITE; // Write control
+  input wire [31:0]   HWDATA; // Write data
+  input wire 	      HREADY; // Transfer phase done
+  input               func_debug_mode_en;
+  output wire 	      HREADYOUT; // Device ready
+  output wire [31:0]  HRDATA; // Read data output
+  output wire 	      HRESP; // Device response (always OKAY)
+  output              I2CM_output_enable;
+  output              I2CS_output_enable;
+  output              I2CM_scl_enable;
+  input wire	      I2CM_sw_rstn;
+  input wire	      I2CS_sw_rstn;
+
+  input  i2c_master_gated_clk;
+  input  i2c_slave_gated_clk;
+
+  // I2C Master
+  input i2c_sda_in;
+  output i2c_sda_out;
+  output i2c_scl;
+
+  //I2C Slave
+  input i2c_sda_slave_in;
+  output i2c_sda_slave_out;
+  input i2c_scl_slave_in;
+
+ output wire 		masked_i2c_slave_interrupt;   // i2c slave masking register edited by CH Pavan on 08/01/2021
+  output wire  		masked_i2c_master_interrupt;    // i2c master masking register edited by CH Pavan on 08/01/2021
+      
+output [127:0] debug_ahb_i2c_bus,debug_bus_0,debug_bus_1,debug_bus_2,debug_bus_3,debug_bus_4,debug_bus_5,debug_bus_6,debug_bus_7;
+
+wire  [127:0] debug_ahb_i2c_bus_int,debug_bus_0_int,debug_bus_1_int,debug_bus_2_int,debug_bus_3_int,debug_bus_4_int,debug_bus_5_int,debug_bus_6_int,debug_bus_7_int;
+
+assign debug_ahb_i2c_bus = {128{func_debug_mode_en}} & debug_ahb_i2c_bus_int;
+assign debug_bus_0       = {128{func_debug_mode_en}} & debug_bus_0_int;
+assign debug_bus_1       = {128{func_debug_mode_en}} & debug_bus_1_int;
+assign debug_bus_2       = {128{func_debug_mode_en}} & debug_bus_2_int;
+assign debug_bus_3       = {128{func_debug_mode_en}} & debug_bus_3_int;
+assign debug_bus_4       = {128{func_debug_mode_en}} & debug_bus_4_int;
+assign debug_bus_5       = {128{func_debug_mode_en}} & debug_bus_5_int;
+assign debug_bus_6       = {128{func_debug_mode_en}} & debug_bus_6_int;  // debug mux for i2c master
+assign debug_bus_7       = {128{func_debug_mode_en}} & debug_bus_7_int;  // debug mux for i2c slave
+  
+  //Signals to controller
+ 
+ 
+  wire [31:0]	M_TX_FIFO_STATUS;
+  wire [31:0]	M_RX_FIFO_STATUS;
+  wire [31:0]	S_TX_FIFO_STATUS;
+  wire [31:0]	S_RX_FIFO_STATUS;
+  wire [7:0]	RD;
+  wire [7:0]	RD_S;
+  wire [2:0]	HSIZE_OUT;
+  wire [31:0]	TD;
+  wire [31:0]	TD_S;
+  wire			DAV;
+  wire			DAV_S;
+  wire [31:0]	i2c_divider;
+  wire			clear_tx_over_run;
+  wire			clear_rx_over_run;
+  wire			clear_tx_under_run;
+  wire			clear_rx_under_run;
+  wire			clear_slave_tx_over_run;
+  wire			clear_slave_rx_over_run;
+  wire			clear_slave_tx_under_run;
+  wire			clear_slave_rx_under_run;
+  wire 			ahb_rx_re_m;
+  wire			ahb_rx_re_s;
+  wire 			i2c_sda_in;
+  wire 			i2c_sda_out;
+  wire 			i2c_scl;
+  wire                  i2c_master_oe;
+  wire 			i2c_slave_oe;
+  wire 			i2c_master_scl_oe;
+ wire [31:0] I2C_CTRL_REG;
+ wire begin_transfer;
+ wire stop_state;
+ // added on 18/1/2021
+ wire [1:0] clear_signal_top;
+ wire [1:0] master_ack_detect,master_no_ack_detect; 
+
+   
+  assign ahb_rx_re_m = (~HWRITE && HSEL && ({HADDR[11:10], HADDR[4:2]} == 5'b01100));
+  assign ahb_rx_re_s = (~HWRITE && HSEL && ({HADDR[11:10], HADDR[4:2]} == 5'b10011));
+
+  assign I2CM_output_enable = 'b0;
+  assign I2CS_output_enable = 'b0;
+  assign I2CM_scl_enable    = 'b0;
+
+
+
+  
+  ahb_slave_if_i2c AHB_DUT	(
+								.HCLK						(HCLK), 
+								.HRESETn					(HRESETn),
+			`ifdef S9P4_DFT_ENABLE						
+				.dft_test_mode					(dft_test_mode), // Modified Sharmi 
+			`endif
+								.HSEL						(HSEL),
+								.HADDR						(HADDR), 
+								.HTRANS						(HTRANS), 
+								.HSIZE						(HSIZE), 
+								.HWRITE						(HWRITE),
+								.HWDATA						(HWDATA), 
+								.HREADY						(HREADY), 
+								.HREADYOUT					(HREADYOUT), 
+								.HRDATA						(HRDATA), 
+								.HRESP						(HRESP), 
+								.M_TX_FIFO_STATUS			(M_TX_FIFO_STATUS),    	
+								.M_RX_FIFO_STATUS			(M_RX_FIFO_STATUS),   	
+								.S_TX_FIFO_STATUS			(S_TX_FIFO_STATUS),    	
+								.S_RX_FIFO_STATUS			(S_RX_FIFO_STATUS),   	
+								.RD							(RD), 					
+								.RD_S						(RD_S),							 
+								.HSIZE_OUT					(HSIZE_OUT),
+								.TD							(TD),
+								.TD_S						(TD_S),
+								.DAV						(DAV),
+								.DAV_S						(DAV_S),
+							    	.I2CM_sw_rstn						(I2CM_sw_rstn),
+							    	.I2CS_sw_rstn						(I2CS_sw_rstn),
+							    	.I2C_divider				(i2c_divider),
+							    	.clear_tx_over_run			(clear_tx_over_run),  	
+								.clear_rx_over_run			(clear_rx_over_run),	
+								.clear_tx_under_run			(clear_tx_under_run),
+								.clear_rx_under_run			(clear_rx_under_run),	
+								.clear_slave_tx_over_run	(clear_slave_tx_over_run),  
+								.clear_slave_rx_over_run	(clear_slave_rx_over_run),	
+								.clear_slave_tx_under_run	(clear_slave_tx_under_run),	
+								.clear_slave_rx_under_run	(clear_slave_rx_under_run),
+								.begin_transfer	(begin_transfer),
+								.stop_state	(stop_state),
+								.I2C_CTRL_REG                    (I2C_CTRL_REG),
+								.masked_i2c_slave_interrupt		(masked_i2c_slave_interrupt),
+								.masked_i2c_master_interrupt		(masked_i2c_master_interrupt),
+								.ack				(master_ack_detect),
+								.no_ack				(master_no_ack_detect),
+								.clear_ack			(clear_signal_top),
+								.debug_ahb_i2c                   (debug_ahb_i2c_bus_int)
+	
+  );
+     
+  i2c_top I2C_DUT		                     	(	.master_clk						(i2c_master_gated_clk),
+								.slave_clk                                              (i2c_slave_gated_clk),
+								.reset_n					(HRESETn),
+								.DAV						(DAV),
+								.in_32						(TD),
+								.out_8						(RD),
+								.HSIZE						(HSIZE_OUT),
+								.M_TX_FIFO_STATUS			(M_TX_FIFO_STATUS),
+								.M_RX_FIFO_STATUS			(M_RX_FIFO_STATUS),
+								.ahb_rx_re					(ahb_rx_re_m),
+								.DIVIDE_BY					(i2c_divider),
+								.DAV_SLAVE					(DAV_S),
+								.slave_in_32				(TD_S),
+								.slave_data_out				(RD_S),
+								.ahb_slave_rx_re			(ahb_rx_re_s),
+								.clear_tx_over_run			(clear_tx_over_run),
+								.clear_tx_under_run			(clear_tx_under_run),
+								.clear_rx_over_run			(clear_rx_over_run),
+								.clear_rx_under_run			(clear_rx_under_run), 
+								.clear_slave_tx_over_run	(clear_slave_tx_over_run),
+								.clear_slave_tx_under_run	(clear_slave_tx_under_run),
+								.clear_slave_rx_over_run	(clear_slave_rx_over_run),
+			`ifdef S9P4_DFT_ENABLE
+ 								.dft_test_mode			(dft_test_mode), // Modified Sharmi
+			`endif
+								.clear_slave_rx_under_run	(clear_slave_rx_under_run),
+								.S_RX_FIFO_STATUS			(S_RX_FIFO_STATUS),
+								.S_TX_FIFO_STATUS			(S_TX_FIFO_STATUS),
+								.i2c_sda_in					(i2c_sda_in),
+								.i2c_sda_out				(i2c_sda_out),
+								.i2c_scl			 		(i2c_scl),
+								.i2c_sda_slave_in			(i2c_sda_slave_in),
+								.i2c_sda_slave_out			(i2c_sda_slave_out),
+								.i2c_scl_slave_in			(i2c_scl_slave_in),
+								.I2CM_sw_rstn				(I2CM_sw_rstn),
+								.I2CS_sw_rstn				(I2CS_sw_rstn),
+								.i2c_master_far_near_enb                (I2C_CTRL_REG[16]),
+								.i2c_master_debug_enb                   (I2C_CTRL_REG[17]),
+								.i2c_slave_far_near_enb                 (I2C_CTRL_REG[19]),
+								.begin_transfer				(begin_transfer),
+								.stop_state				(stop_state),
+								.i2c_slave_debug_enb                    (I2C_CTRL_REG[18]),
+								// added from line 183 on 18/1/2021
+								.clear_signal_top			(clear_signal_top),
+								.repeat_we_re				(I2C_CTRL_REG[27]),
+								.re_start_enb				(I2C_CTRL_REG[20]),
+								.lfrs					(I2C_CTRL_REG[26:21]),
+								.master_ack_detect			(master_ack_detect),
+								.master_no_ack_detect			(master_no_ack_detect),
+								.debug_i2c0				(debug_bus_0_int),                             
+								.debug_i2c1				(debug_bus_1_int),                             
+								.debug_i2c2				(debug_bus_2_int),                             
+								.debug_i2c3				(debug_bus_3_int),                             
+								.debug_i2c4				(debug_bus_4_int),                             
+								.debug_i2c5				(debug_bus_5_int),
+								.reset_ext_slave			(I2C_CTRL_REG[28]),
+								.slave_addr_top				(I2C_CTRL_REG[15:8]),
+								.length_top				(I2C_CTRL_REG[5:0]),
+								.debug_i2c6				(debug_bus_6_int),
+								.debug_i2c7  				(debug_bus_7_int)                          
+							  );
+
+ 
+endmodule
