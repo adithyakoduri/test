@@ -1,0 +1,200 @@
+module i2c_TX_FIFO#(parameter WIDTH = 8, DEPTH = 16)(input clk,reset_n,we,re,clear_tx_over_run,clear_tx_under_run,input [2:0]HSIZE,input [31:0]din,output reg [7:0]dout, output [31:0] M_TX_FIFO_STATUS,output [127:0] debug_i2c_master_tx); 
+
+localparam FIFO_DEPTH = ($clog2(DEPTH) - 1);
+
+parameter [2:0] Eight_bit     = 3'b000,
+Sixteen_bit   = 3'b001,
+ThirtyTwo_bit = 3'b010;
+
+wire full,empty;
+reg [(WIDTH-1):0]mem[(DEPTH-1):0];
+reg[FIFO_DEPTH:0] wptr,rptr;
+integer i;
+
+always@(posedge clk or negedge reset_n)    ///// write logic
+begin
+if(!reset_n)
+begin
+
+ wptr <= 4'd0;
+ 
+for(i=0;i<DEPTH;i=i+1)
+mem[i] <= 8'd0;
+                end
+else if(we)
+begin
+        case(HSIZE)
+Eight_bit: begin
+	mem [wptr[(FIFO_DEPTH):0]][(WIDTH-1):0]    <= din[7:0];
+	wptr[(FIFO_DEPTH):0] <= wptr[(FIFO_DEPTH):0] + 1;
+end
+
+Sixteen_bit: begin
+	if(wptr <= DEPTH - 2) begin
+	mem[wptr[(FIFO_DEPTH):0]][(WIDTH-1):0] <= din[7:0];
+	mem [wptr[(FIFO_DEPTH):0]+1][(WIDTH-1):0] <= din[15:8];
+	wptr[(FIFO_DEPTH):0] <= wptr[(FIFO_DEPTH):0] + 2;
+	end
+	else begin
+	mem[wptr[(FIFO_DEPTH):0]][(WIDTH-1):0] <= din[7:0];
+	mem [0][(WIDTH-1):0] <= din[15:8];
+	wptr[(FIFO_DEPTH):0] <= wptr[(FIFO_DEPTH):0] + 2;
+	end
+end
+
+ThirtyTwo_bit: begin
+	if(wptr < DEPTH - 3) begin
+		mem[wptr[(FIFO_DEPTH ):0]][(WIDTH-1):0]   <= din[7:0];
+		mem[wptr[(FIFO_DEPTH ):0]+1][(WIDTH-1):0] <= din[15:8];
+		mem[wptr[(FIFO_DEPTH ):0]+2][(WIDTH-1):0] <= din[23:16];
+		mem[wptr[(FIFO_DEPTH ):0]+3][(WIDTH-1):0] <= din[31:24];
+		wptr[(FIFO_DEPTH ):0] <= wptr[(FIFO_DEPTH ):0] + 4;
+	end
+	else if(wptr == DEPTH - 3)
+	begin
+		mem[wptr[(FIFO_DEPTH ):0]][(WIDTH-1):0]   <= din[7:0];
+		mem[wptr[(FIFO_DEPTH ):0]+1][(WIDTH-1):0] <= din[15:8];
+		mem[wptr[(FIFO_DEPTH ):0]+2][(WIDTH-1):0] <= din[23:16];
+		mem[0][(WIDTH-1):0] <= din[31:24];
+		wptr[(FIFO_DEPTH ):0] <= wptr[(FIFO_DEPTH ):0] + 4;	
+	end
+	else if(wptr == DEPTH - 2)begin
+		mem[wptr[(FIFO_DEPTH ):0]][(WIDTH-1):0]   <= din[7:0];
+		mem[wptr[(FIFO_DEPTH ):0]+1][(WIDTH-1):0] <= din[15:8];
+		mem[0][(WIDTH-1):0] <= din[23:16];
+		mem[1][(WIDTH-1):0] <= din[31:24];
+		wptr[(FIFO_DEPTH ):0] <= wptr[(FIFO_DEPTH ):0] + 4;
+	end
+	else if(wptr == DEPTH - 1)begin
+		mem[wptr[(FIFO_DEPTH ):0]][(WIDTH-1):0]   <= din[7:0];
+		mem[0][(WIDTH-1):0] <= din[15:8];
+		mem[1][(WIDTH-1):0] <= din[23:16];
+		mem[2][(WIDTH-1):0] <= din[31:24];
+		wptr[(FIFO_DEPTH ):0] <= wptr[(FIFO_DEPTH ):0] + 4;
+	end
+end
+
+default :  begin
+	  	mem [wptr[FIFO_DEPTH:0]][(WIDTH - 1):0]    <= din[7:0];
+		wptr[FIFO_DEPTH:0] <= wptr[FIFO_DEPTH:0] + 1;
+	   end 
+
+endcase
+       end
+end
+
+  always@(posedge clk or negedge reset_n)
+begin
+if(!reset_n)
+begin
+                  rptr <= 4'd0;
+                  dout <= 8'd0;
+end
+else
+ if(re) // re && some_signal
+     begin
+       dout <= mem[rptr[(FIFO_DEPTH):0]];
+       rptr <= rptr +1'b1;
+     end 
+end
+
+reg [(FIFO_DEPTH):0] tx_status_cnt;
+wire tx_over_run;
+always @ (posedge clk or negedge reset_n)
+	begin : STATUS_COUNTER
+	if (~reset_n) begin
+tx_status_cnt <= 4'd0;
+// Read but no write.
+end
+ else if ((re) && !(we)) begin
+tx_status_cnt <= tx_status_cnt - 1;
+// Write but no read.
+end else if ((we && (HSIZE == 3'd0)) && !(re)) begin
+if(tx_status_cnt != (DEPTH - 1)) 
+	tx_status_cnt <= tx_status_cnt + 1;
+else
+	tx_status_cnt <= tx_status_cnt;
+end else if ((we && (HSIZE == 3'd1)) && !(re)) begin
+if(tx_status_cnt != (DEPTH - 1))
+	tx_status_cnt <= tx_status_cnt + 2;
+else
+	tx_status_cnt <= tx_status_cnt;
+end
+ else if ((we && (HSIZE == 3'd2)) && !(re)) begin
+if(tx_status_cnt != (DEPTH - 1))
+	tx_status_cnt <= tx_status_cnt + 4;
+else
+	tx_status_cnt <= tx_status_cnt;
+end
+ else if ((we && (HSIZE == 3'd0)) && (re) ) begin
+tx_status_cnt <= tx_status_cnt ;
+end 
+else if ((we && (HSIZE == 3'd1)) && (re)) begin
+tx_status_cnt <= tx_status_cnt + 1 ;
+end 
+else if ((we && (HSIZE == 3'd2)) && (re)) begin
+tx_status_cnt <= tx_status_cnt + 3 ;
+end 
+
+end
+//assign full = (wptr > ((DEPTH-1)) && ((wptr - rptr) == DEPTH )) ? 1:0; // edited by hari_sir & bhaskar 11/11
+//assign empty = (wptr == rptr) ? 1 : 0;
+assign full = (tx_status_cnt == (DEPTH-1));
+assign empty = (tx_status_cnt == 4'd0);
+
+assign atleast_4_bytes = ((DEPTH - tx_status_cnt) > 3'd4);
+assign atleast_2_bytes = ((DEPTH - tx_status_cnt) > 3'd2);
+assign atleast_1_bytes = ((DEPTH - 1) == tx_status_cnt) ? 0 : 1;
+
+assign tx_over_run = (full && we && !re); 
+assign tx_under_run = (empty && re && !we);
+reg tx_over_run_latch;
+reg tx_under_run_latch;
+always@(posedge clk or negedge reset_n)
+begin
+	if(~reset_n)
+		tx_over_run_latch <= 1'b0;
+	else if(clear_tx_over_run)
+		tx_over_run_latch <= 1'b0;
+
+	else if(tx_over_run)
+		tx_over_run_latch <= tx_over_run;
+	else
+		tx_over_run_latch <= tx_over_run_latch;
+end 
+
+always@(posedge clk or negedge reset_n)
+begin
+	if(~reset_n)
+		tx_under_run_latch <= 1'b0;
+	else if(clear_tx_under_run)
+		tx_under_run_latch <= 1'b0;
+
+	else if(tx_under_run)
+		tx_under_run_latch <= tx_under_run;
+	else
+		tx_under_run_latch <= tx_under_run_latch;
+end 
+
+
+
+		assign M_TX_FIFO_STATUS[0] 	= empty;
+		assign M_TX_FIFO_STATUS[1] 	= full;
+		assign M_TX_FIFO_STATUS[2] 	= atleast_4_bytes;
+		assign M_TX_FIFO_STATUS[3] 	= atleast_2_bytes;
+		assign M_TX_FIFO_STATUS[4] 	= atleast_1_bytes;
+		assign M_TX_FIFO_STATUS[5] 	= tx_over_run_latch;	
+		assign M_TX_FIFO_STATUS[6] 	= tx_under_run_latch;	
+
+		assign M_TX_FIFO_STATUS[12:8] = rptr;
+		assign M_TX_FIFO_STATUS[20:16]= wptr;
+		assign M_TX_FIFO_STATUS[28:24]= tx_status_cnt;
+		assign M_TX_FIFO_STATUS[7]	= 1'b0;
+		assign M_TX_FIFO_STATUS[15:13]= 3'd0;
+		assign M_TX_FIFO_STATUS[23:21]= 3'd0;
+		assign M_TX_FIFO_STATUS[31:29]= 3'd0;
+
+
+assign debug_i2c_master_tx = {28'd0,M_TX_FIFO_STATUS,re,we,tx_under_run,tx_over_run,tx_status_cnt,atleast_1_bytes,atleast_2_bytes,atleast_4_bytes,empty,full,dout,din,HSIZE,clear_tx_under_run,clear_tx_over_run,reset_n,clk,rptr,wptr};
+
+endmodule

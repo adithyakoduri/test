@@ -1,0 +1,136 @@
+module i2c_slave_rx_fifo#(parameter WIDTH=8,DEPTH=16)( input clk,reset_n,slave_rx_we,slave_rx_re,clear_slave_rx_over_run,clear_slave_rx_under_run,
+				input [7:0] slave_rx_din,
+				output reg [7:0] slave_rx_dout,
+				output [31:0]S_RX_FIFO_STATUS,output [127:0] debug_i2c_slave_rx);
+
+localparam FIFO_DEPTH = $clog2(DEPTH);
+
+reg [(WIDTH-1):0] slave_rx_mem[(DEPTH-1):0];
+reg [FIFO_DEPTH:0] slave_rx_wptr,slave_rx_rptr;
+integer i;
+
+wire slave_rx_full, slave_rx_empty;
+
+always@(posedge clk or negedge reset_n)
+ begin
+  if(~reset_n)
+    begin
+	  for(i=0;i<DEPTH;i=i+1)
+	       slave_rx_mem[i] <= 8'd0;
+    end
+  else if(slave_rx_we)
+         begin
+	        slave_rx_mem[slave_rx_wptr[(FIFO_DEPTH-1):0]] <= slave_rx_din;
+         end
+end
+
+always@(posedge clk or negedge reset_n)
+  begin
+    if(~reset_n)     
+	  slave_rx_dout <= 8'd0;
+    else	
+      slave_rx_dout <= slave_rx_mem[slave_rx_rptr[(FIFO_DEPTH-1):0]];
+  end		 
+  
+always@(posedge clk or negedge reset_n)
+  begin
+    if(~reset_n)
+	   begin
+	     slave_rx_wptr <= 5'd0;
+	   end
+	else 
+	   begin
+	    if(slave_rx_we )
+		   slave_rx_wptr <= slave_rx_wptr + 1'b1;
+	   end
+  end
+
+always@(posedge clk or negedge reset_n)
+  begin
+    if(~reset_n)
+	   begin
+	     slave_rx_rptr <= 5'd0;
+	   end
+	else 
+	    begin
+	          if(slave_rx_re )
+		      slave_rx_rptr <= slave_rx_rptr + 1'b1;
+	    end
+  end	 
+	 
+reg [FIFO_DEPTH:0] slave_rx_status_cnt;
+wire slave_rx_over_run;
+always @ (posedge clk or negedge reset_n)
+	begin : STATUS_COUNTER
+	if (~reset_n) begin
+slave_rx_status_cnt <= 5'd0;
+// Read but no write.
+end
+ else if ((slave_rx_re) && !(slave_rx_we) ) begin
+slave_rx_status_cnt <= slave_rx_status_cnt - 1'd1;
+// Write but no read.
+end 
+else if ((slave_rx_we  && !(slave_rx_re) )) begin
+slave_rx_status_cnt <= slave_rx_status_cnt + 1'd1;
+end 
+ else if ((slave_rx_we && (slave_rx_re) )) begin
+slave_rx_status_cnt <= slave_rx_status_cnt ;
+end 	 
+end
+
+assign slave_rx_full = (slave_rx_status_cnt == (DEPTH-1));
+assign slave_rx_empty = (slave_rx_status_cnt == 5'd0);
+	 
+assign atleast_4_bytes = ((DEPTH - slave_rx_status_cnt) > 3'd4);
+assign atleast_2_bytes = ((DEPTH - slave_rx_status_cnt) > 3'd2);
+assign atleast_1_bytes = ((DEPTH - slave_rx_status_cnt) > 3'd1);
+
+assign slave_rx_over_run = (slave_rx_status_cnt == DEPTH); 
+assign slave_rx_under_run = (&slave_rx_status_cnt);
+reg slave_rx_over_run_latch;
+reg slave_rx_under_run_latch;
+
+always@(posedge clk or negedge reset_n)
+begin
+	if(~reset_n)
+		slave_rx_over_run_latch <= 1'd0;
+	else if(clear_slave_rx_over_run)
+		slave_rx_over_run_latch <= 1'd0;
+	else if(slave_rx_over_run)
+		slave_rx_over_run_latch <= slave_rx_over_run;
+	else
+		slave_rx_over_run_latch <= slave_rx_over_run_latch;
+end 
+
+
+always@(posedge clk or negedge reset_n)
+begin
+	if(~reset_n)
+		slave_rx_under_run_latch <= 1'd0;
+	else if(clear_slave_rx_under_run)
+		slave_rx_under_run_latch <= 1'd0;
+	else if(slave_rx_under_run)
+		slave_rx_under_run_latch <= slave_rx_under_run;
+	else
+		slave_rx_under_run_latch <= slave_rx_under_run_latch;
+end 
+
+assign S_RX_FIFO_STATUS[0] 	= slave_rx_empty;
+assign S_RX_FIFO_STATUS[1] 	= slave_rx_full;
+assign S_RX_FIFO_STATUS[2] 	= atleast_4_bytes;
+assign S_RX_FIFO_STATUS[3] 	= atleast_2_bytes;
+assign S_RX_FIFO_STATUS[4] 	= atleast_1_bytes;
+assign S_RX_FIFO_STATUS[5] 	= slave_rx_over_run_latch;	
+assign S_RX_FIFO_STATUS[6] 	= slave_rx_under_run_latch;	
+assign S_RX_FIFO_STATUS[12:8] = slave_rx_rptr;
+assign S_RX_FIFO_STATUS[20:16]= slave_rx_wptr;
+assign S_RX_FIFO_STATUS[28:24]= slave_rx_status_cnt;
+assign S_RX_FIFO_STATUS[7]	= 1'b0;
+assign S_RX_FIFO_STATUS[15:13]= 3'd0;
+assign S_RX_FIFO_STATUS[23:21]= 3'd0;
+assign S_RX_FIFO_STATUS[31:29]= 3'd0;
+
+assign debug_i2c_slave_rx = {55'd0,S_RX_FIFO_STATUS,slave_rx_re,slave_rx_we,slave_rx_under_run,slave_rx_over_run,slave_rx_status_cnt,slave_rx_empty,slave_rx_full,slave_rx_dout,slave_rx_din,clear_slave_rx_under_run,clear_slave_rx_over_run,reset_n,clk,slave_rx_rptr,slave_rx_wptr};
+
+
+endmodule

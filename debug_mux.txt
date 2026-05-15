@@ -1,0 +1,16 @@
+module debug_mux_i2c(input [7:0]dbg_tx_fifo_dout_i2c,
+input [7:0]dbg_ISR_out_i2c,
+input [7:0]dbg_rx_fifo_dout_i2c,
+input [31:0]dbg_tx_fifo_din_i2c,
+input dbg_FAR_NEARn_enb_i2c,
+input dbg_DBG_EN_i2c,
+output [7:0]dbg_far_end_out_i2c,
+output [31:0]dbg_near_end_out_i2c,
+output [127:0] debug_mux_i2c_bus
+);
+
+assign dbg_far_end_out_i2c = (dbg_FAR_NEARn_enb_i2c & dbg_DBG_EN_i2c) ? (dbg_tx_fifo_dout_i2c) : (dbg_ISR_out_i2c);	
+assign dbg_near_end_out_i2c = (!dbg_FAR_NEARn_enb_i2c & dbg_DBG_EN_i2c) ? ({24'd0,dbg_rx_fifo_dout_i2c}) : (dbg_tx_fifo_din_i2c);
+assign debug_mux_i2c_bus  = {30'd0,dbg_near_end_out_i2c,dbg_far_end_out_i2c,dbg_DBG_EN_i2c,dbg_FAR_NEARn_enb_i2c,dbg_tx_fifo_din_i2c,dbg_rx_fifo_dout_i2c,dbg_ISR_out_i2c,dbg_tx_fifo_dout_i2c};
+
+endmodule
